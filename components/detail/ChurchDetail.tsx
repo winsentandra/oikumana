@@ -9,11 +9,17 @@ import type { Church, Locale } from "@/lib/types";
 
 export function ChurchDetail({
   church,
+  /** Every church sharing this one's pin (including itself), in tab order.
+   * Fewer than two entries means there's nothing to switch between. */
+  siblings = [],
+  onSwitch,
   locale,
   /** Desktop leads with the category, mobile with the parish. */
   eyebrow,
 }: {
   church: Church;
+  siblings?: Church[];
+  onSwitch?: (slug: string) => void;
   locale: Locale;
   eyebrow: "category" | "parish";
 }) {
@@ -23,6 +29,30 @@ export function ChurchDetail({
 
   return (
     <article className="flex flex-col gap-2 px-3 pt-3 pb-4">
+      {siblings.length > 1 ? (
+        <div role="tablist" className="-mb-1 flex gap-1">
+          {siblings.map((sibling) => {
+            const active = sibling.slug === church.slug;
+            return (
+              <button
+                key={sibling.slug}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => onSwitch?.(sibling.slug)}
+                className={`h-[36px] shrink-0 rounded-card px-[12px] font-ui text-sm font-medium whitespace-nowrap transition-colors ${
+                  active
+                    ? "bg-maroon text-offwhite"
+                    : "border border-stroke bg-offwhite text-brown hover:bg-cream"
+                }`}
+              >
+                {sibling.parish.replace(/\s+Parish$/, "")}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
       <header className="flex flex-col gap-[4px]">
         <p className="font-body text-lg font-bold text-maroon">
           {eyebrow === "category" ? church.category[locale] : church.parish}

@@ -91,12 +91,16 @@ export function MapCanvas({
     };
   }, []);
 
-  // Sync markers with the data.
+  // Sync markers with the data. A church whose `group` lists a slug ahead of
+  // its own shares that other church's pin — only the group's first member
+  // gets a marker, and clicking it always selects that same first slug; the
+  // detail panel's own tabs handle switching between the rest.
   useEffect(() => {
     const m = map.current;
     if (!m) return;
 
     for (const church of churches) {
+      if (church.group && church.group[0] !== church.slug) continue;
       if (markers.current.has(church.slug)) continue;
       const marker = L.marker(church.coords, {
         icon: L.divIcon({
@@ -121,7 +125,9 @@ export function MapCanvas({
     if (!m) return;
 
     for (const [slug, marker] of markers.current) {
-      const isSelected = slug === selected;
+      const church = churches.find((c) => c.slug === slug);
+      const group = church?.group ?? [slug];
+      const isSelected = !!selected && group.includes(selected);
       marker.setIcon(
         L.divIcon({
           className: `oikumana-pin${isSelected ? " is-selected" : ""}`,

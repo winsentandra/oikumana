@@ -23,6 +23,10 @@ export interface Church {
   deanery: Localized;
   /** Drives the region chip filter. */
   region: string;
+  /** Slugs of every church (including this one) sharing this location as a
+   * single pin, in tab display order. Omitted for churches with their own
+   * pin. */
+  group?: string[];
   /** ISO date; formatted per locale at render time. */
   consecratedOn?: string;
   /** Paragraphs. Everything after the first takes a first-line indent. */

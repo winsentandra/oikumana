@@ -72,6 +72,15 @@ export function MapShell() {
   const mapRef = useRef<MapCanvasHandle>(null);
   const isDesktop = useIsDesktop();
   const church = selected ? getChurch(selected) : undefined;
+  // Every church sharing `church`'s pin (including itself), resolved for the
+  // detail panel's own tab row. A church with no `group` has no siblings.
+  const siblingChurches = useMemo(
+    () =>
+      church?.group
+        ? church.group.map(getChurch).filter((c): c is NonNullable<typeof c> => !!c)
+        : [],
+    [church]
+  );
 
   const results = useMemo(
     () => searchChurches(churches, query, locale),
@@ -92,6 +101,12 @@ export function MapShell() {
     setSearching(false);
     setQuery("");
   };
+
+  // Switching tabs within a shared pin's detail — unlike `openChurch`, this
+  // doesn't touch search/view, and (via `resetKey` below, keyed off the
+  // group's first slug rather than `selected`) doesn't collapse the mobile
+  // sheet back to Peek either. It's still the same site.
+  const switchChurch = (slug: string) => setSelected(slug);
 
   const closeSearch = () => {
     setSearching(false);
@@ -328,7 +343,13 @@ export function MapShell() {
                 listBody
               ) : church ? (
                 <div className="no-scrollbar min-h-0 flex-1 overflow-y-auto">
-                  <ChurchDetail church={church} locale={locale} eyebrow="category" />
+                  <ChurchDetail
+                    church={church}
+                    siblings={siblingChurches}
+                    onSwitch={switchChurch}
+                    locale={locale}
+                    eyebrow="category"
+                  />
                 </div>
               ) : null}
             </aside>
@@ -394,10 +415,20 @@ export function MapShell() {
             open={view === "detail" && !!church}
             onClose={closePanel}
             label={church?.name[locale] ?? ""}
-            resetKey={selected ?? undefined}
+            // Keyed off the group's own first slug (or the plain slug for a
+            // church with no siblings) rather than `selected` itself, so
+            // switching tabs on a shared pin doesn't collapse the sheet back
+            // to Peek — that reset is for switching to a different site.
+            resetKey={church?.group?.[0] ?? selected ?? undefined}
           >
             {church ? (
-              <ChurchDetail church={church} locale={locale} eyebrow="parish" />
+              <ChurchDetail
+                church={church}
+                siblings={siblingChurches}
+                onSwitch={switchChurch}
+                locale={locale}
+                eyebrow="parish"
+              />
             ) : null}
           </BottomSheet>
         </>
