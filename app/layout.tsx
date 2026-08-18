@@ -1,6 +1,24 @@
 import type { Metadata, Viewport } from "next";
 import { Literata, Onest } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
+
+const infini = localFont({
+  src: [
+    {
+      path: "./fonts/infini-romain.otf",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "./fonts/infini-gras.otf",
+      weight: "700",
+      style: "normal",
+    },
+  ],
+  variable: "--font-infini",
+  display: "swap",
+});
 
 const literata = Literata({
   variable: "--font-literata",
@@ -42,7 +60,7 @@ export default function RootLayout({
     // properties inherit their already-computed value, not a live reference. If
     // --font-literata were only defined on <body>, --font-body would compute to
     // invalid at :root (before that variable exists) and stay broken on inherit.
-    <html lang="en" className={`${literata.variable} ${sans.variable}`}>
+    <html lang="en" className={`${infini.variable} ${literata.variable} ${sans.variable}`}>
       <body className="antialiased">{children}</body>
     </html>
   );

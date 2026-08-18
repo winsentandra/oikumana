@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { publicAsset } from "@/lib/public-asset";
 
 export type IconName =
   | "about"
@@ -37,7 +38,7 @@ export function Icon({
       aria-hidden="true"
       className={`icon ${className}`}
       style={{
-        ["--icon" as string]: `url(/icons/${name}.svg)`,
+        ["--icon" as string]: `url("${publicAsset(`/icons/${name}.svg`)}")`,
         ...(rotate ? { transform: `rotate(${rotate}deg)` } : null),
         ...style,
       }}
@@ -51,7 +52,9 @@ export function LogoMark({ className = "" }: { className?: string }) {
     <span
       aria-hidden="true"
       className={`icon icon-logo ${className}`}
-      style={{ ["--icon" as string]: "url(/icons/logo.svg)" }}
+      style={{
+        ["--icon" as string]: `url("${publicAsset("/icons/logo.svg")}")`,
+      }}
     />
   );
 }

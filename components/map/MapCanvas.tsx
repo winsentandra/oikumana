@@ -3,13 +3,14 @@
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
 import L from "leaflet";
 import type { Church } from "@/lib/types";
+import { publicAsset } from "@/lib/public-asset";
 
 /** Jakarta, framed the way the mockups open. */
 const CENTER: [number, number] = [-6.175, 106.83];
 const ZOOM = 14;
 
 const pinHtml = (selected: boolean) =>
-  `<img src="/icons/map-pin.svg" width="48" height="48" alt="" draggable="false" class="${
+  `<img src="${publicAsset("/icons/map-pin.svg")}" width="48" height="48" alt="" draggable="false" class="${
     selected ? "is-selected" : ""
   }" />`;
 
