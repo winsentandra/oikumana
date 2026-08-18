@@ -1,10 +1,14 @@
 import type { NextConfig } from "next";
 
+const repositoryName = "oikumana"; // Replace if your GitHub repo has another name
+
 const nextConfig: NextConfig = {
-  // The shell fills the viewport edge to edge; the floating dev badge sits on
-  // top of the map and gets in the way of visual comparison against the
-  // mockups.
-  devIndicators: false,
+  output: "export",
+  trailingSlash: true,
+  basePath: "",
+  images: {
+    unoptimized: true,
+  },
 };
 
 export default nextConfig;
