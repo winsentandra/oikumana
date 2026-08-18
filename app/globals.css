@@ -1,26 +1,201 @@
 @import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ---------------------------------------------------------------- fonts --
+   Infini — Sandrine Nugue / CNAP. Not on any CDN, served from public/fonts.
+   "romain" = regular, "gras" = bold.                                       */
+
+@font-face {
+  font-family: "Infini";
+  src: url("/fonts/infini-romain.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+@font-face {
+  font-family: "Infini";
+  src: url("/fonts/infini-gras.otf") format("opentype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@theme {
+  /* -------------------------------------------------------------- colour --
+     The six brand tokens, plus the two overlays.                           */
+  --color-brown: #2b2118;
+  --color-peach: #ffccaa;
+  --color-warm: #6b5d4f;
+  --color-maroon: #700000;
+  --color-offwhite: #faf5ec;
+  --color-cream: #f3ead7;
+  --color-white: #ffffff;
+
+  --color-stroke: rgba(0, 0, 0, 0.12); /* borders, dividers, hairlines */
+  --color-scrim: rgba(0, 0, 0, 0.48); /* dim behind panel, search, modal */
+
+  /* ------------------------------------------------------------- spacing --
+     Rebasing the scale to 8px makes every integer utility land on the grid:
+     p-1 = 8, p-2 = 16, p-3 = 24, p-4 = 32, p-6 = 48, p-9 = 72, w-60 = 480.
+     Anything off-grid has to be written as an arbitrary value, which keeps
+     the three real exceptions (12px strip padding, 36px chip, 4px grabber)
+     visible instead of hidden inside the scale.                            */
+  --spacing: 8px;
+
+  /* ---------------------------------------------------------------- type --*/
+  --font-display: "Infini", Georgia, serif;
+  --font-body: var(--font-literata), Georgia, serif;
+  --font-ui: var(--font-sans), system-ui, sans-serif;
+
+  /* Text sizes use Tailwind's own scale rather than custom tokens:
+     h1 -> text-3xl leading-[36px] (30/36, exact line-height match to the
+     measured 36px pitch), eyebrow -> text-lg leading-[24px] (18/24), body ->
+     text-base (16/24, exact), label -> text-sm (14/20, exact), badge ->
+     text-xs (12/16, nearest available — measured ink wanted ~10px but
+     Tailwind's scale bottoms out at 12).
+
+     Numbered leading-N utilities are spacing-multiplied in Tailwind v4
+     (calc(var(--spacing) * N)) — with --spacing redefined to 8px above
+     (not the framework default of 4px), leading-6/leading-9 would render
+     at 48px/72px instead of 24px/36px. Bracket values sidestep that. */
+
+  --radius-card: 8px;
+
+  --shadow-panel: 0 0 16px rgba(0, 0, 0, 0.32);
+  --shadow-float: 0 0 16px rgba(0, 0, 0, 0.32);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--color-offwhite);
+    color: var(--color-brown);
+    font-family: var(--font-body);
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+    overscroll-behavior: none;
+  }
+
+  /* The design is a fixed-viewport app shell, never a scrolling document. */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-maroon);
+    outline-offset: 2px;
+    border-radius: 2px;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer components {
+  /* ---------------------------------------------------------------- icon --
+     Every supplied SVG is a single black path on a 24x24 canvas, so one file
+     serves every colour: mask it and paint with the inherited text colour.
+     Source files are never edited or duplicated.                           */
+  .icon {
+    display: block;
+    inline-size: 24px;
+    block-size: 24px;
+    flex: none;
+    background-color: currentColor;
+    -webkit-mask: var(--icon) center / 24px 24px no-repeat;
+    mask: var(--icon) center / 24px 24px no-repeat;
+  }
+
+  /* The logo mark is a 120x120 canvas; same technique, different box. */
+  .icon-logo {
+    -webkit-mask: var(--icon) center / contain no-repeat;
+    mask: var(--icon) center / contain no-repeat;
+  }
+
+  /* Chip rail and list scroll without visible scrollbars. */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Book setting: paragraphs after the first take a first-line indent and
+     no vertical space between them. */
+  .prose-book > p + p {
+    text-indent: 16px;
+  }
+
+  /* 4x4 dot between the parish and the region on a list row. */
+  .meta-dot::before {
+    content: "";
+    display: inline-block;
+    inline-size: 4px;
+    block-size: 4px;
+    border-radius: 9999px;
+    background: currentColor;
+    vertical-align: 0.2em;
+    margin-inline: 8px;
+  }
+}
+
+@layer utilities {
+  .text-tracked {
+    letter-spacing: 0.06em;
+  }
+}
+
+/* ------------------------------------------------------------- leaflet --
+   Strip Leaflet's chrome back to nothing so the basemap reads as the
+   background plate the mockups show.                                      */
+.leaflet-container {
+  background: var(--color-cream);
+  font-family: var(--font-ui);
+  outline: none;
+}
+
+.leaflet-control-attribution {
+  background: rgba(250, 245, 236, 0.82) !important;
+  color: var(--color-warm) !important;
+  font-family: var(--font-ui);
+  font-size: 10px !important;
+  line-height: 16px !important;
+  padding: 0 6px !important;
+  border-radius: 4px 0 0 0;
+}
+
+.leaflet-control-attribution a {
+  color: var(--color-warm) !important;
+}
+
+.oikumana-pin {
+  background: none;
+  border: none;
+  transition: transform 160ms ease;
+  transform-origin: 50% 100%;
+}
+
+.oikumana-pin.is-selected {
+  transform: scale(1.15);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
