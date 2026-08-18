@@ -1,13 +1,13 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { HeaderCluster } from "./chrome/HeaderCluster";
 import { SearchBar } from "./search/SearchBar";
 import { SearchResults } from "./search/SearchResults";
 import { RegionChips } from "./panel/RegionChips";
 import { ChurchRow } from "./panel/ChurchRow";
-import { BottomSheet, type BottomSheetHandle } from "./panel/BottomSheet";
+import { BottomSheet, PEEK_TOP_FRACTION } from "./panel/BottomSheet";
 import { ChurchDetail } from "./detail/ChurchDetail";
 import { AboutModal } from "./about/AboutModal";
 import { MapControls } from "./map/MapControls";
@@ -26,6 +26,16 @@ const MapCanvas = dynamic(() => import("./map/MapCanvas"), {
 
 const PANEL_WIDTH = 480;
 
+/** Header cluster's own footprint on mobile: `top-2` (16px) plus its `h-6`
+ * row (48px) — the pin fly-to keeps clear of this so it doesn't land
+ * underneath the chrome. */
+const HEADER_BOTTOM_PX = 64;
+
+/** Matches the scrim's `duration-200` so the mobile list panel fades out
+ * together with the dimming behind it, instead of vanishing instantly while
+ * the scrim is still mid-fade over whatever replaced it. */
+const LIST_FADE_MS = 200;
+
 type View = "map" | "list" | "detail";
 
 export function MapShell() {
@@ -38,41 +48,30 @@ export function MapShell() {
   const [about, setAbout] = useState(false);
   const [locating, setLocating] = useState(false);
 
-  const mapRef = useRef<MapCanvasHandle>(null);
-  const sheetRef = useRef<BottomSheetHandle>(null);
-  const isDesktop = useIsDesktop();
-  const church = selected ? getChurch(selected) : undefined;
-
-  // Android's hardware back button collapses the sheet by one level instead
-  // of leaving the page — a history entry is pushed while it's open, and a
-  // back press is intercepted to collapse rather than navigate. If the
-  // sheet closes some other way (swipe, tap X) while that entry is still
-  // outstanding, it's consumed with one history.back() so a later real back
-  // press doesn't land on a stale trap.
-  const pushedHistory = useRef(false);
-  useEffect(() => {
-    if (view !== "detail") {
-      if (pushedHistory.current) {
-        pushedHistory.current = false;
-        history.back();
-      }
+  // Kept mounted slightly past `view` leaving "list" so it can fade out
+  // instead of disappearing on the spot; opening is instant (both flip
+  // before paint, via useLayoutEffect) since only the close needs to sync
+  // with the scrim's own fade. A plain useEffect here would run after the
+  // browser had already painted the stale bottom-bar branch for one frame
+  // (mount state hasn't caught up to `view` yet) — visible as a flash
+  // whenever list opens fast enough, e.g. tapping search then list in quick
+  // succession.
+  const [listMounted, setListMounted] = useState(false);
+  const [listEntered, setListEntered] = useState(false);
+  useLayoutEffect(() => {
+    if (view === "list") {
+      setListMounted(true);
+      setListEntered(true);
       return;
     }
-
-    history.pushState({ oikumanaSheet: true }, "");
-    pushedHistory.current = true;
-
-    const onPopState = () => {
-      pushedHistory.current = false;
-      const stillOpen = sheetRef.current?.collapseOneLevel();
-      if (stillOpen) {
-        history.pushState({ oikumanaSheet: true }, "");
-        pushedHistory.current = true;
-      }
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
+    setListEntered(false);
+    const id = setTimeout(() => setListMounted(false), LIST_FADE_MS);
+    return () => clearTimeout(id);
   }, [view]);
+
+  const mapRef = useRef<MapCanvasHandle>(null);
+  const isDesktop = useIsDesktop();
+  const church = selected ? getChurch(selected) : undefined;
 
   const results = useMemo(
     () => searchChurches(churches, query, locale),
@@ -97,6 +96,14 @@ export function MapShell() {
   const closeSearch = () => {
     setSearching(false);
     setQuery("");
+  };
+
+  // The mobile search overlay's own X always closes the whole panel back to
+  // the map — even when search was opened from inside the list — rather than
+  // just dropping back to whatever view was underneath.
+  const closeSearchPanel = () => {
+    closeSearch();
+    setView("map");
   };
 
   // On mobile, an active search takes over the whole screen (matching the
@@ -183,7 +190,7 @@ export function MapShell() {
   // visible underneath — the same stacking bug as the old mobile behaviour.
   // `showDropdown` opts out of the dropdown in that case; the panel body
   // swaps to full-bleed results instead (see the desktop aside below).
-  const searchCluster = (showDropdown: boolean) => (
+  const searchCluster = (showDropdown: boolean, showLocate = true) => (
     <div className="flex gap-1">
       {leadingButton}
       <div className="relative flex min-w-0 flex-1 flex-col">
@@ -218,7 +225,7 @@ export function MapShell() {
           </div>
         ) : null}
       </div>
-      {!isDesktop ? mobileLocateButton : null}
+      {!isDesktop && showLocate ? mobileLocateButton : null}
     </div>
   );
 
@@ -259,7 +266,8 @@ export function MapShell() {
         selected={selected}
         onSelect={openChurch}
         panelOffset={isDesktop && view !== "map" ? PANEL_WIDTH : 0}
-        onMapTap={() => sheetRef.current?.collapseOneLevel()}
+        topInset={!isDesktop ? HEADER_BOTTOM_PX : 0}
+        bottomInsetFraction={!isDesktop && view === "detail" ? 1 - PEEK_TOP_FRACTION : 0}
       />
 
       {/* Zoom is desktop-only; on mobile the locate button moves inline next
@@ -355,7 +363,7 @@ export function MapShell() {
                     // that blur unmounts the overlay, the click never lands.
                     // An explicit close button in the field sidesteps that
                     // entirely: shown whenever there's no text to clear yet.
-                    trailingAction={{ label: t(locale, "closePanel"), onClick: closeSearch }}
+                    trailingAction={{ label: t(locale, "closePanel"), onClick: closeSearchPanel }}
                     elevated={false}
                   />
                 </div>
@@ -368,12 +376,14 @@ export function MapShell() {
                 bleed
               />
             </aside>
-          ) : view === "list" ? (
+          ) : listMounted ? (
             <aside
               aria-label={t(locale, "churchList")}
-              className="fixed inset-0 z-30 flex flex-col bg-offwhite"
+              className={`fixed inset-0 z-30 flex flex-col bg-offwhite transition-opacity duration-200 ${
+                listEntered ? "opacity-100" : "opacity-0"
+              }`}
             >
-              <div className="shrink-0 bg-cream p-2">{searchCluster(true)}</div>
+              <div className="shrink-0 bg-cream p-2">{searchCluster(true, false)}</div>
               {listBody}
             </aside>
           ) : (
@@ -381,7 +391,6 @@ export function MapShell() {
           )}
 
           <BottomSheet
-            ref={sheetRef}
             open={view === "detail" && !!church}
             onClose={closePanel}
             label={church?.name[locale] ?? ""}

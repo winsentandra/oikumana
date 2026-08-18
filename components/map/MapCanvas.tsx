@@ -29,32 +29,33 @@ export function MapCanvas({
   onSelect,
   /** Horizontal room taken by the desktop panel, so fly-to stays clear of it. */
   panelOffset,
-  /** A genuine tap on the open map/backdrop — never fires for a pan or a
-   * pinch, since Leaflet itself only emits `click` for a tap that didn't
-   * turn into a drag. Used to collapse the open sheet by one level. */
-  onMapTap,
+  /** Vertical room taken by the header cluster at the top, so a selected
+   * pin doesn't land underneath it (mobile only — desktop's header floats
+   * clear of the map already). */
+  topInset = 0,
+  /** Fraction (0-1) of the viewport height covered by the mobile bottom
+   * sheet at rest (Peek), so a selected pin centers in the space actually
+   * left visible above it rather than the full screen. */
+  bottomInsetFraction = 0,
   ref,
 }: {
   churches: Church[];
   selected: string | null;
   onSelect: (slug: string) => void;
   panelOffset: number;
-  onMapTap?: () => void;
+  topInset?: number;
+  bottomInsetFraction?: number;
   ref?: Ref<MapCanvasHandle>;
 }) {
   const holder = useRef<HTMLDivElement>(null);
   const map = useRef<L.Map | null>(null);
   const markers = useRef<Map<string, L.Marker>>(new Map());
   const onSelectRef = useRef(onSelect);
-  const onMapTapRef = useRef(onMapTap);
 
-  // Keep the click handlers current without re-creating the markers/map.
+  // Keep the click handler current without re-creating the markers.
   useEffect(() => {
     onSelectRef.current = onSelect;
   }, [onSelect]);
-  useEffect(() => {
-    onMapTapRef.current = onMapTap;
-  }, [onMapTap]);
 
   // Init once.
   useEffect(() => {
@@ -65,49 +66,10 @@ export function MapCanvas({
       zoom: ZOOM,
       zoomControl: false,
       attributionControl: true,
-      // Leaflet's own scrollWheelZoom zooms on *any* wheel event, with no
-      // way to tell a plain mouse-wheel notch apart from a trackpad pinch —
-      // both arrive as the same WheelEvent. It's off here and replaced
-      // below with a handler that only zooms on ctrlKey wheel (see there
-      // for why that's the actual pinch signal).
-      scrollWheelZoom: false,
-      doubleClickZoom: false,
+      // Default Leaflet/Google-Maps-style interaction: plain scroll-wheel
+      // zooms, double-click zooms, touch pinch zooms, single-finger drag
+      // pans. No custom gesture filtering.
     });
-
-    m.on("click", () => onMapTapRef.current?.());
-
-    // A trackpad pinch has no dedicated browser event — macOS/the browser
-    // reports it as a WheelEvent with ctrlKey forced true (this is true even
-    // though no Ctrl key is actually pressed; it's the standard signal sites
-    // use to tell pinch apart from an ordinary two-finger scroll, same as
-    // Google Maps). Leaflet's touchZoom only covers genuine multi-touch
-    // events, which a trackpad never sends, so without this, pinch has no
-    // handler at all on a laptop. Plain wheel (no ctrlKey) is left alone —
-    // not zoomed, not panned — matching "pinch only".
-    const ZOOM_SENSITIVITY = 0.01;
-    let zoomRaf: number | null = null;
-    let pendingDelta = 0;
-    let pendingPoint: L.Point | null = null;
-
-    const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) return;
-      e.preventDefault();
-      pendingDelta += e.deltaY;
-      pendingPoint = new L.Point(e.offsetX, e.offsetY);
-      if (zoomRaf !== null) return;
-      zoomRaf = requestAnimationFrame(() => {
-        zoomRaf = null;
-        if (!pendingPoint) return;
-        const nextZoom = m.getZoom() - pendingDelta * ZOOM_SENSITIVITY;
-        pendingDelta = 0;
-        m.setZoomAround(
-          pendingPoint,
-          Math.min(Math.max(nextZoom, m.getMinZoom()), m.getMaxZoom()),
-          { animate: false }
-        );
-      });
-    };
-    holder.current.addEventListener("wheel", onWheel, { passive: false });
 
     L.tileLayer(
       "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
@@ -122,10 +84,7 @@ export function MapCanvas({
     map.current = m;
 
     const created = markers.current;
-    const holderEl = holder.current;
     return () => {
-      if (zoomRaf !== null) cancelAnimationFrame(zoomRaf);
-      holderEl.removeEventListener("wheel", onWheel);
       m.remove();
       map.current = null;
       created.clear();
@@ -181,11 +140,19 @@ export function MapCanvas({
     const point = m.project(church.coords, m.getZoom());
     // Shift the target right by half the panel so the pin lands in the
     // uncovered part of the viewport rather than behind the rail.
-    const shifted = point.subtract([panelOffset / 2, 0]);
+    // Vertically (mobile), center the pin in the area actually left visible
+    // between the header and the peeking bottom sheet, rather than the full
+    // screen height — same trick, on the other axis: subtracting how far
+    // that area's midpoint sits from the viewport's own midpoint.
+    const size = m.getSize();
+    const visibleTop = topInset;
+    const visibleBottom = size.y * (1 - bottomInsetFraction);
+    const vOffset = (visibleTop + visibleBottom) / 2 - size.y / 2;
+    const shifted = point.subtract([panelOffset / 2, vOffset]);
     m.flyTo(m.unproject(shifted, m.getZoom()), Math.max(m.getZoom(), 15), {
       duration: 0.6,
     });
-  }, [selected, churches, panelOffset]);
+  }, [selected, churches, panelOffset, topInset, bottomInsetFraction]);
 
   // Zoom and locate controls live outside this component (desktop bottom-right
   // stack, mobile inline-with-search button) so both can drive the same map
@@ -199,16 +166,17 @@ export function MapCanvas({
         map.current?.flyTo([lat, lng], zoom, { duration: 0.8 });
       },
       suspendInteraction: (ms) => {
-        // Only touches what's normally enabled — scroll-wheel and
-        // double-click zoom are off permanently (pinch-only), so there's
-        // nothing to suspend or restore there.
         const m = map.current;
         if (!m) return;
         m.dragging.disable();
+        m.scrollWheelZoom.disable();
         m.touchZoom.disable();
+        m.doubleClickZoom.disable();
         setTimeout(() => {
           m.dragging.enable();
+          m.scrollWheelZoom.enable();
           m.touchZoom.enable();
+          m.doubleClickZoom.enable();
         }, ms);
       },
     }),

@@ -67,7 +67,7 @@ export function AboutModal({
   const whoBody = t(locale, "aboutWhoBody") as readonly string[];
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center p-2">
+    <div className="fixed inset-0 z-40 flex items-start justify-center pt-2 md:items-center md:p-2">
       <button
         type="button"
         aria-label={t(locale, "closePanel")}
@@ -80,7 +80,7 @@ export function AboutModal({
         role="dialog"
         aria-modal="true"
         aria-label={t(locale, "openAbout")}
-        className="relative flex max-h-[min(700px,calc(100dvh-32px))] w-full max-w-[640px] flex-col overflow-hidden rounded-card bg-offwhite"
+        className="relative flex max-h-[calc(100dvh-16px)] w-full flex-col overflow-hidden rounded-t-card bg-offwhite md:max-h-[min(700px,calc(100dvh-32px))] md:max-w-[640px] md:rounded-card"
       >
         <button
           ref={closeBtn}
