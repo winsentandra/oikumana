@@ -200,7 +200,14 @@ export function MapShell() {
   // Floating over the map it carries a shadow; inside the panel strip it
   // carries a stroke instead. The border is always present so the box stays
   // exactly 48x48.
-  const elevated = view === "map";
+  //
+  // This is about where the cluster physically sits, which is not the same
+  // question as which view is active. On mobile the bottom bar keeps
+  // floating over the map through the detail view too — it stays rendered,
+  // and the sheet simply rises over it — so keying this off `view === "map"`
+  // alone made it swap to its docked hairline the instant a pin was tapped,
+  // visible as a flash of borders in the frames before the sheet covered it.
+  const elevated = view === "map" || (!isDesktop && view === "detail");
   const leadingButton = (
     <button
       type="button"
