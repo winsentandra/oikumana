@@ -1,5 +1,6 @@
 "use client";
 
+import type { Ref } from "react";
 import { BrandPill } from "./BrandPill";
 import { IconPill } from "./IconPill";
 import { LanguageMenu } from "./LanguageMenu";
@@ -22,13 +23,22 @@ export function HeaderCluster({
   locale,
   onLocaleChange,
   onAbout,
+  ref,
 }: {
   locale: Locale;
   onLocaleChange: (l: Locale) => void;
   onAbout: () => void;
+  /** The shell measures this to know how much of the map the chrome covers,
+   * so a selected pin flies to somewhere actually visible. Measured rather
+   * than assumed, because the row grows with the reader's text size and with
+   * whatever the notch adds on top. */
+  ref?: Ref<HTMLDivElement>;
 }) {
   return (
-    <div className="pointer-events-none isolate fixed inset-x-2 top-2 z-10 flex items-start gap-1 md:inset-x-auto md:right-2 md:left-auto">
+    <div
+      ref={ref}
+      className="safe-t safe-x pointer-events-none isolate fixed inset-x-2 top-2 z-10 flex items-start gap-1 md:inset-x-auto md:right-2 md:left-auto"
+    >
       <div className="pointer-events-auto order-1 md:order-2">
         <IconPill
           icon="about"

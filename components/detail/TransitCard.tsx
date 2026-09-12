@@ -23,7 +23,7 @@ export function TransitCard({
 
   return (
     <section className={`rounded-card bg-cream px-2 pt-2 ${className}`}>
-      <h3 className="font-ui text-sm font-extrabold tracking-[0.06em] text-warm uppercase">
+      <h3 className="font-ui text-sm font-extrabold tracking-label text-warm uppercase">
         {label}
       </h3>
       <ul>

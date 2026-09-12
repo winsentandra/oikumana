@@ -14,7 +14,7 @@ export function AddressCard({
   return (
     <section className="rounded-card bg-cream px-2">
       <div className="py-2">
-        <h3 className="font-ui text-sm font-extrabold tracking-[0.06em] text-warm uppercase">
+        <h3 className="font-ui text-sm font-extrabold tracking-label text-warm uppercase">
           {label}
         </h3>
         <p className="font-ui text-sm text-brown">{address}</p>
@@ -23,7 +23,7 @@ export function AddressCard({
         href={href}
         target="_blank"
         rel="noreferrer noopener"
-        className="flex items-center gap-1 border-t border-stroke py-2 font-ui text-sm font-extrabold tracking-[0.06em] text-brown uppercase transition-colors hover:text-maroon"
+        className="flex items-center gap-1 border-t border-stroke py-2 font-ui text-sm font-extrabold tracking-label text-brown uppercase transition-colors hover:text-maroon"
       >
         <Icon name="direction" className="text-warm" />
         {directionsLabel}

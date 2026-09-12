@@ -40,7 +40,7 @@ export function ChurchDetail({
                 role="tab"
                 aria-selected={active}
                 onClick={() => onSwitch?.(sibling.slug)}
-                className={`h-[36px] shrink-0 rounded-card px-[12px] font-ui text-sm font-medium whitespace-nowrap transition-colors ${
+                className={`h-[2.25rem] shrink-0 rounded-card px-[0.75rem] font-ui text-sm font-medium whitespace-nowrap transition-colors ${
                   active
                     ? "bg-maroon text-offwhite"
                     : "border border-stroke bg-offwhite text-brown hover:bg-cream"

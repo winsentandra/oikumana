@@ -16,6 +16,7 @@ import { churches, regions, getChurch } from "@/lib/churches";
 import { searchChurches } from "@/lib/search";
 import { t } from "@/lib/i18n";
 import { useIsDesktop } from "@/lib/useMediaQuery";
+import { useFocusReturn, useFocusTrap } from "@/lib/focus";
 import type { Locale } from "@/lib/types";
 import type { MapCanvasHandle } from "./map/MapCanvas";
 
@@ -24,14 +25,20 @@ const MapCanvas = dynamic(() => import("./map/MapCanvas"), {
   loading: () => <div className="absolute inset-0 z-0 bg-cream" />,
 });
 
-const PANEL_WIDTH = 480;
+/** The desktop rail, 480px. The pixel width the map needs for its fly-to
+ * offset is measured off the real element rather than assumed, since the
+ * column grows with the reader's text size; this is only the pre-measurement
+ * fallback for the very first frame. */
+const PANEL_WIDTH_FALLBACK_PX = 480;
 
-/** Header cluster's own footprint on mobile: `top-2` (16px) plus its `h-6`
- * row (48px) — the pin fly-to keeps clear of this so it doesn't land
- * underneath the chrome. */
-const HEADER_BOTTOM_PX = 64;
+/** Header cluster's own footprint on mobile — the pin fly-to keeps clear of
+ * it so a selected pin doesn't land underneath the chrome. Measured rather
+ * than hard-coded: the row grows with the reader's text size, and the notch
+ * adds its own inset on top. The constant is only the pre-measurement
+ * fallback for the very first frame. */
+const HEADER_BOTTOM_FALLBACK_PX = 64;
 
-/** Matches the scrim's `duration-200` so the mobile list panel fades out
+/** Matches the scrim's `duration-200` so the mobile list panel leaves
  * together with the dimming behind it, instead of vanishing instantly while
  * the scrim is still mid-fade over whatever replaced it. */
 const LIST_FADE_MS = 200;
@@ -60,6 +67,9 @@ export function MapShell() {
   const [listEntered, setListEntered] = useState(false);
   useLayoutEffect(() => {
     if (view === "list") {
+      // Both flags have to land before the browser paints, which is the one
+      // thing this rule exists to discourage — see the note above.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setListMounted(true);
       setListEntered(true);
       return;
@@ -71,6 +81,32 @@ export function MapShell() {
 
   const mapRef = useRef<MapCanvasHandle>(null);
   const isDesktop = useIsDesktop();
+
+  const headerRef = useRef<HTMLDivElement>(null);
+  const [headerInset, setHeaderInset] = useState(HEADER_BOTTOM_FALLBACK_PX);
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const read = () => setHeaderInset(el.getBoundingClientRect().bottom);
+    read();
+    const observer = new ResizeObserver(read);
+    observer.observe(el);
+    window.addEventListener("resize", read);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", read);
+    };
+  }, []);
+
+  const panelRef = useRef<HTMLElement>(null);
+  const [panelWidth, setPanelWidth] = useState(PANEL_WIDTH_FALLBACK_PX);
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => setPanelWidth(el.offsetWidth));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [view, isDesktop]);
   const church = selected ? getChurch(selected) : undefined;
   // Every church sharing `church`'s pin (including itself), resolved for the
   // detail panel's own tab row. A church with no `group` has no siblings.
@@ -129,6 +165,16 @@ export function MapShell() {
   // `view` at all — search focused from inside the list panel swaps to the
   // same full-screen search state, not a dropdown stacked over the list.
   const mobileSearchOverlay = !isDesktop && searching;
+
+  // Both mobile surfaces cover the whole screen, so Tab has nowhere
+  // legitimate to go outside them, and closing one should hand focus back to
+  // whatever opened it rather than dropping it at the top of the document.
+  const searchOverlayRef = useRef<HTMLElement>(null);
+  const listRef = useRef<HTMLElement>(null);
+  useFocusTrap(searchOverlayRef, mobileSearchOverlay);
+  useFocusTrap(listRef, !isDesktop && view === "list");
+  useFocusReturn(mobileSearchOverlay);
+  useFocusReturn(!isDesktop && view === "list");
 
   // Opening the list is also the one place search needs to be explicitly
   // dismissed — otherwise it stays open underneath and reappears (stacked
@@ -280,9 +326,10 @@ export function MapShell() {
         churches={churches}
         selected={selected}
         onSelect={openChurch}
-        panelOffset={isDesktop && view !== "map" ? PANEL_WIDTH : 0}
-        topInset={!isDesktop ? HEADER_BOTTOM_PX : 0}
+        panelOffset={isDesktop && view !== "map" ? panelWidth : 0}
+        topInset={!isDesktop ? headerInset : 0}
         bottomInsetFraction={!isDesktop && view === "detail" ? 1 - PEEK_TOP_FRACTION : 0}
+        label={t(locale, "mapLabel")}
       />
 
       {/* Zoom is desktop-only; on mobile the locate button moves inline next
@@ -302,6 +349,7 @@ export function MapShell() {
       ) : null}
 
       <HeaderCluster
+        ref={headerRef}
         locale={locale}
         onLocaleChange={setLocale}
         onAbout={() => setAbout(true)}
@@ -320,15 +368,18 @@ export function MapShell() {
 
       {isDesktop ? (
         <>
-          {/* Same 480 column as the panel, with the same 16px inset on both
-              sides — so the field is 392 wide whether it floats over the map
-              or sits in the panel strip, and never resizes between states. */}
+          {/* Same column as the panel, less the 16px inset on both sides —
+              so the field is the same width whether it floats over the map or
+              sits in the panel strip, and never resizes between states. */}
           {view === "map" ? (
-            <div className="fixed top-2 left-2 z-30 w-[448px]">{searchCluster(true)}</div>
+            <div className="fixed top-2 left-2 z-30 w-[calc(30rem-2rem)]">
+              {searchCluster(true)}
+            </div>
           ) : (
             <aside
+              ref={panelRef}
               aria-label={view === "list" ? t(locale, "churchList") : undefined}
-              className="fixed inset-y-0 left-0 z-30 flex w-[480px] flex-col bg-offwhite shadow-panel"
+              className="fixed inset-y-0 left-0 z-30 flex w-[30rem] flex-col bg-offwhite shadow-panel"
             >
               <div className="shrink-0 bg-cream p-2">{searchCluster(false)}</div>
               {searching ? (
@@ -359,8 +410,9 @@ export function MapShell() {
         <>
           {mobileSearchOverlay ? (
             <aside
+              ref={searchOverlayRef}
               aria-label={t(locale, "searchPlaceholder")}
-              className="fixed inset-0 z-30 flex flex-col bg-offwhite"
+              className="safe-t fixed inset-0 z-30 flex flex-col bg-offwhite"
             >
               <div className="shrink-0 bg-cream p-2">
                 <div className="flex gap-1">
@@ -399,8 +451,9 @@ export function MapShell() {
             </aside>
           ) : listMounted ? (
             <aside
+              ref={listRef}
               aria-label={t(locale, "churchList")}
-              className={`fixed inset-0 z-30 flex flex-col bg-offwhite transition-opacity duration-200 ${
+              className={`safe-t fixed inset-0 z-30 flex flex-col bg-offwhite transition-opacity duration-200 ${
                 listEntered ? "opacity-100" : "opacity-0"
               }`}
             >
@@ -408,7 +461,11 @@ export function MapShell() {
               {listBody}
             </aside>
           ) : (
-            <div className="fixed inset-x-2 bottom-2 z-30">{searchCluster(true)}</div>
+            // `safe-b` keeps the bar clear of the home indicator: the layout
+            // declares `viewportFit: cover`, so the viewport runs underneath it.
+            <div className="safe-b safe-x fixed inset-x-2 bottom-2 z-30">
+              {searchCluster(true)}
+            </div>
           )}
 
           <BottomSheet

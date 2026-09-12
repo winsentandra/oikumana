@@ -60,7 +60,7 @@ export function LanguageMenu({
         <ul
           role="listbox"
           aria-label={label}
-          className="absolute top-full right-0 mt-1 min-w-[var(--spacing-lang-menu,200px)] overflow-hidden rounded-card bg-offwhite py-1 shadow-panel"
+          className="absolute top-full right-0 mt-1 min-w-[12.5rem] overflow-hidden rounded-card bg-offwhite py-1 shadow-panel"
         >
           {locales.map((l) => {
             const selected = l.code === locale;
@@ -75,7 +75,7 @@ export function LanguageMenu({
                     setOpen(false);
                     triggerRef.current?.focus();
                   }}
-                  className={`flex w-full items-center px-[12px] py-1 text-left font-ui text-base whitespace-nowrap transition-colors hover:bg-cream ${
+                  className={`flex w-full items-center px-[0.75rem] py-1 text-left font-ui text-base whitespace-nowrap transition-colors hover:bg-cream ${
                     selected ? "text-maroon" : "text-brown"
                   }`}
                 >

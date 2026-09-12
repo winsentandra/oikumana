@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { Icon } from "@/components/ui/Icon";
 import { SatorSquare } from "./SatorSquare";
+import { useFocusReturn, useFocusTrap } from "@/lib/focus";
 import { PORTFOLIO_URL, t } from "@/lib/i18n";
 import type { Locale } from "@/lib/types";
 
@@ -33,32 +34,17 @@ export function AboutModal({
   const card = useRef<HTMLDivElement>(null);
   const closeBtn = useRef<HTMLButtonElement>(null);
 
+  // Tab stays inside the card, and dismissing hands focus back to the About
+  // control that opened it rather than dropping it at the top of the page.
+  useFocusTrap(card, true);
+  useFocusReturn(true);
+
   useEffect(() => {
     closeBtn.current?.focus();
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab" || !card.current) return;
-
-      const focusable = card.current.querySelectorAll<HTMLElement>(
-        'a[href], button, [tabindex]:not([tabindex="-1"])'
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
+      if (e.key === "Escape") onClose();
     };
-
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
@@ -121,7 +107,7 @@ export function AboutModal({
             href={PORTFOLIO_URL}
             target="_blank"
             rel="noreferrer noopener"
-            className="mt-3 flex h-6 items-center justify-between rounded-card bg-maroon px-2 font-ui text-base font-extrabold tracking-[0.06em] text-offwhite uppercase transition-opacity hover:opacity-90"
+            className="mt-3 flex h-6 items-center justify-between rounded-card bg-maroon px-2 font-ui text-base font-extrabold tracking-label text-offwhite uppercase transition-opacity hover:opacity-90"
           >
             {t(locale, "portfolio")}
             <Icon name="chevron-down" rotate={-90} />

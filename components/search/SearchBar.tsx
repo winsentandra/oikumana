@@ -48,7 +48,7 @@ export function SearchBar({
 
   return (
     <div
-      className={`relative z-0 flex h-6 min-w-0 flex-1 items-center gap-1 rounded-card border bg-offwhite pl-2 pr-[11px] ${
+      className={`relative z-0 flex h-6 min-w-0 flex-1 items-center gap-1 rounded-card border bg-offwhite pl-2 pr-[0.6875rem] ${
         elevated ? "border-transparent shadow-float" : "border-stroke"
       }`}
     >
@@ -66,12 +66,14 @@ export function SearchBar({
       />
       <Icon name="search" className="text-brown" />
       {trailing ? (
-        <span className="flex h-4 items-center border-l border-stroke pl-[11px]">
+        <span className="flex h-4 items-center border-l border-stroke pl-[0.6875rem]">
           <button
             type="button"
             onClick={trailing.onClick}
             aria-label={trailing.label}
-            className="grid size-3 place-items-center rounded-full bg-cream text-brown transition-colors hover:bg-stroke"
+            // The visible dot stays small; `before` widens what you can
+            // actually hit to a full 44px without moving anything.
+            className="relative grid size-3 place-items-center rounded-full bg-cream text-brown transition-colors before:absolute before:-inset-[0.625rem] before:content-[''] hover:bg-stroke"
           >
             <Icon name="close-small" />
           </button>

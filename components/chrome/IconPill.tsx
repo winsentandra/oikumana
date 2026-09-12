@@ -33,7 +33,7 @@ export function IconPill({
       onClick={onClick}
       aria-label={srLabel ?? label}
       aria-expanded={expanded}
-      className="relative z-0 flex h-6 shrink-0 items-center rounded-card bg-offwhite px-[12px] text-brown shadow-float transition-colors hover:bg-cream"
+      className="relative z-0 flex h-6 shrink-0 items-center rounded-card bg-offwhite px-[0.75rem] text-brown shadow-float transition-colors hover:bg-cream"
     >
       <Icon name={icon} className="text-maroon" />
       {showLabel ? (

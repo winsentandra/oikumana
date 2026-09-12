@@ -23,8 +23,12 @@
      p-1 = 8, p-2 = 16, p-3 = 24, p-4 = 32, p-6 = 48, p-9 = 72, w-60 = 480.
      Anything off-grid has to be written as an arbitrary value, which keeps
      the three real exceptions (12px strip padding, 36px chip, 4px grabber)
-     visible instead of hidden inside the scale.                            */
-  --spacing: 8px;
+     visible instead of hidden inside the scale.
+
+     It is expressed in `rem`, not `px`, so the whole layout scales with the
+     reader's own text-size setting instead of pinning text into boxes that
+     can't grow with it. At the browser default this is still exactly 8px.  */
+  --spacing: 0.5rem;
 
   /* ---------------------------------------------------------------- type --*/
   --font-display: var(--font-infini), Georgia, serif;
@@ -39,10 +43,16 @@
      Tailwind's scale bottoms out at 12).
 
      Numbered leading-N utilities are spacing-multiplied in Tailwind v4
-     (calc(var(--spacing) * N)) — with --spacing redefined to 8px above
-     (not the framework default of 4px), leading-6/leading-9 would render
-     at 48px/72px instead of 24px/36px. Bracket values sidestep that. */
+     (calc(var(--spacing) * N)) — with --spacing redefined above (not the
+     framework default of 4px), leading-6/leading-9 would render at the wrong
+     pitch. Bracket values sidestep that. */
 
+  /* The tracked uppercase labels, as a token rather than the same bracket
+     value repeated at eight call sites. */
+  --tracking-label: 0.06em;
+
+  /* Corner radius is a fixed design constant, not text-relative — it stays
+     in px so it doesn't grow with the reader's font size. */
   --radius-card: 8px;
 
   --shadow-panel: 0 0 16px rgba(0, 0, 0, 0.32);
@@ -79,7 +89,8 @@
   :focus-visible {
     outline: 2px solid var(--color-maroon);
     outline-offset: 2px;
-    border-radius: 2px;
+    /* No radius of its own — the ring follows whatever the element already
+       has, so it never cuts across a rounded corner. */
   }
 }
 
@@ -87,15 +98,17 @@
   /* ---------------------------------------------------------------- icon --
      Every supplied SVG is a single black path on a 24x24 canvas, so one file
      serves every colour: mask it and paint with the inherited text colour.
-     Source files are never edited or duplicated.                           */
+     Source files are never edited or duplicated.
+
+     Sized in `rem` so icons grow alongside the text they sit next to.       */
   .icon {
     display: block;
-    inline-size: 24px;
-    block-size: 24px;
+    inline-size: 1.5rem;
+    block-size: 1.5rem;
     flex: none;
     background-color: currentColor;
-    -webkit-mask: var(--icon) center / 24px 24px no-repeat;
-    mask: var(--icon) center / 24px 24px no-repeat;
+    -webkit-mask: var(--icon) center / 1.5rem 1.5rem no-repeat;
+    mask: var(--icon) center / 1.5rem 1.5rem no-repeat;
   }
 
   /* The logo mark is a 120x120 canvas; same technique, different box. */
@@ -116,7 +129,7 @@
   /* Book setting: paragraphs after the first take a first-line indent and
      no vertical space between them. */
   .prose-book > p + p {
-    text-indent: 16px;
+    text-indent: 1rem;
   }
 
   /* 4x4 dot between the parish and the region on a list row. */
@@ -128,13 +141,27 @@
     border-radius: 9999px;
     background: currentColor;
     vertical-align: 0.2em;
-    margin-inline: 8px;
+    margin-inline: 0.5rem;
   }
 }
 
 @layer utilities {
   .text-tracked {
-    letter-spacing: 0.06em;
+    letter-spacing: var(--tracking-label);
+  }
+
+  /* Chrome that sits against a screen edge has to clear the home indicator
+     and the notch — `viewportFit: cover` in the layout means the viewport
+     runs underneath both. */
+  .safe-b {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .safe-t {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .safe-x {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
   }
 }
 
@@ -172,13 +199,26 @@
   transform: scale(1.15);
 }
 
+/* ---------------------------------------------------- accessibility prefs --
+   Reduced motion means a gentler equivalent, not the absence of feedback.
+   Opacity and colour cross-fades are the safe form of the same signal, so
+   they stay; motion that travels across the screen does not.
+
+   Deliberately not the blanket `transition-duration: 0.01ms !important` this
+   file used to carry: that also flattened the scrim and the sheet's own
+   cross-fade, which are exactly the transitions reduced motion wants to
+   keep. The bottom sheet handles its own reduced-motion path in JS. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  .oikumana-pin,
+  .transition-transform {
+    transition: none !important;
   }
 }

@@ -29,7 +29,7 @@ export function RegionChips({
             type="button"
             aria-pressed={isActive}
             onClick={() => onChange(item.value)}
-            className={`h-[36px] shrink-0 rounded-card px-[12px] font-ui text-sm whitespace-nowrap transition-colors ${
+            className={`h-[2.25rem] shrink-0 rounded-card px-[0.75rem] font-ui text-sm whitespace-nowrap transition-colors ${
               isActive
                 ? "bg-maroon font-medium text-offwhite"
                 : "border border-stroke bg-offwhite text-brown hover:bg-cream"

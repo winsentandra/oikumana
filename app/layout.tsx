@@ -46,7 +46,10 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
+  // No maximumScale / userScalable cap: pinch-zoom is the last resort for
+  // anyone who needs the text bigger than the layout offers, and blocking it
+  // fails WCAG 1.4.4. Leaflet handles its own pinch inside the map, and the
+  // sheet claims its gesture with touch-action, so nothing here needs it.
   viewportFit: "cover",
   themeColor: "#FAF5EC",
 };

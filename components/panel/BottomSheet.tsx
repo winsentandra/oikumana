@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { haptic } from "@/lib/haptics";
+import { projectMomentum, spring, type SpringHandle } from "@/lib/spring";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 
 type SheetState = "hidden" | "peek" | "maximized";
 
@@ -12,10 +15,6 @@ const MAXIMIZED_TOP_PX = 16;
  * in the area above the sheet) can stay in sync with the sheet itself. */
 export const PEEK_TOP_FRACTION = 0.67;
 
-/** Release speed, in px/ms, that commits to the next state in that
- * direction even if released before the midpoint — a fast flick. */
-const VELOCITY_THRESHOLD = 0.5;
-
 /** How much give a drag past the Maximized boundary gets before it stops
  * moving almost entirely — the classic iOS rubber-band diminishing-return
  * curve, not a hard clamp. Dragging past Hidden isn't given the same
@@ -26,9 +25,15 @@ const RUBBER_BAND_SOFTNESS = 200;
  * gesture as "drag the sheet" rather than "just scroll the content". */
 const PENDING_RESOLVE_PX = 8;
 
-/** Apple's own sheet-detent deceleration curve — non-linear, no overshoot. */
-const SNAP_EASING = "cubic-bezier(0.32, 0.72, 0, 1)";
-const SNAP_DURATION_MS = 320;
+/** Apple's own sheet numbers: a little overshoot, because every move this
+ * sheet makes is the continuation of a drag the user's hand just gave it. */
+const SHEET_DAMPING = 0.8;
+const SHEET_RESPONSE = 0.3;
+
+/** Long enough for the spring to have visibly left the screen. The dismiss
+ * is reported to the parent on the spring's own rest callback instead
+ * whenever it settles sooner. */
+const DISMISS_TIMEOUT_MS = 500;
 
 function restingTop(state: SheetState, viewportH: number) {
   if (state === "hidden") return viewportH;
@@ -43,25 +48,24 @@ function rubberBand(rawTop: number) {
   return MAXIMIZED_TOP_PX - damped;
 }
 
-/** Nearest snap state to `rawTop`, or the velocity-implied one for a flick
- * fast enough to commit before reaching the midpoint — true 1:1 tracking
- * means a hard, fast drag from Maximized can land on Hidden directly. */
+/**
+ * The detent a flick is actually heading for. Rather than testing the release
+ * velocity against a threshold, this projects where the motion would come to
+ * rest on its own — the same exponential-decay model scrolling uses — and
+ * snaps to whichever detent is nearest *that*. A hard throw from Maximized
+ * therefore reaches Hidden in one motion, and a slow release still lands on
+ * the nearest detent, without the two cases needing separate rules.
+ */
 function pickSnap(rawTop: number, velocity: number, viewportH: number): SheetState {
   const points: { key: SheetState; top: number }[] = [
     { key: "maximized", top: MAXIMIZED_TOP_PX },
     { key: "peek", top: PEEK_TOP_FRACTION * viewportH },
     { key: "hidden", top: viewportH },
   ];
-  const nearest = (candidates: typeof points) =>
-    candidates.reduce((a, b) => (Math.abs(b.top - rawTop) < Math.abs(a.top - rawTop) ? b : a)).key;
-
-  if (Math.abs(velocity) > VELOCITY_THRESHOLD) {
-    const movingDown = velocity > 0;
-    const inDirection = points.filter((p) => (movingDown ? p.top >= rawTop : p.top <= rawTop));
-    if (inDirection.length > 0) return nearest(inDirection);
-    return movingDown ? "hidden" : "maximized";
-  }
-  return nearest(points);
+  const projected = rawTop + projectMomentum(velocity);
+  return points.reduce((a, b) =>
+    Math.abs(b.top - projected) < Math.abs(a.top - projected) ? b : a
+  ).key;
 }
 
 /**
@@ -69,9 +73,9 @@ function pickSnap(rawTop: number, velocity: number, viewportH: number): SheetSta
  * Maximized (16px from the top). The sheet tracks the finger 1:1 across the
  * whole range — the grabber always drags it; dragging the content does too,
  * except when Maximized with the content already scrolled down, in which
- * case that same gesture just scrolls the content instead. Release snaps to
- * the nearest state, or the velocity-implied one for a fast flick, so a
- * hard drag from Maximized can land on Hidden in one motion.
+ * case that same gesture just scrolls the content instead. Release hands the
+ * finger's own velocity to a spring, which carries the motion on to whichever
+ * detent the throw was heading for, and can be grabbed again mid-flight.
  */
 export function BottomSheet({
   open,
@@ -110,40 +114,107 @@ function SheetBody({
   resetKey?: string;
 }) {
   const [state, setState] = useState<SheetState>("hidden");
-  const [dragTop, setDragTop] = useState<number | null>(null);
+  const sheetEl = useRef<HTMLDivElement>(null);
   const contentEl = useRef<HTMLDivElement>(null);
+  const reduceMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
 
-  /** One active pointer gesture, whichever surface started it. */
+  /** The value actually on screen this frame — not the resting value of
+   * `state`. Every new animation and every new grab starts from here, which
+   * is what makes the sheet catchable mid-flight instead of jumping to
+   * wherever it was already heading. */
+  const presentedTop = useRef(0);
+  const animation = useRef<SpringHandle | null>(null);
+  /** What the running (or last finished) animation was aimed at, so the
+   * state effect below doesn't re-animate a move the gesture already began. */
+  const animTarget = useRef<number | null>(null);
+
+  /** One active pointer gesture, whichever surface started it.
+   * `scrolling` is a "sheet" drag that reached fully-open mid-gesture and
+   * handed off to manually driving the content's own scrollTop for the
+   * rest of that same touch — see the handoff in onContentPointerMove. */
   const gesture = useRef({
     active: false,
     pointerId: 0,
     startY: 0,
     startTop: 0,
-    mode: "sheet" as "sheet" | "content" | "pending",
+    mode: "sheet" as "sheet" | "content" | "pending" | "scrolling",
+    contentStartScrollTop: 0,
     samples: [] as { t: number; y: number }[],
   });
 
-  // Opens by sliding up from off-screen, matching Apple Maps' own opening
-  // animation, rather than just appearing already at rest. `hasOpened`
-  // distinguishes this transient initial "hidden" from a real dismiss —
-  // without it, the close-on-hidden effect below would fire immediately on
-  // mount, before the opening animation ever played.
-  const hasOpened = useRef(false);
-  useEffect(() => {
-    const id = requestAnimationFrame(() => {
-      hasOpened.current = true;
-      setState("peek");
+  // Position is written straight to the element rather than round-tripping
+  // through React: a pointermove is not a state change, and `transform` is
+  // the only positional property the compositor can move on its own.
+  const applyTop = (top: number) => {
+    presentedTop.current = top;
+    const el = sheetEl.current;
+    if (el) el.style.transform = `translate3d(0, ${top - MAXIMIZED_TOP_PX}px, 0)`;
+  };
+
+  const animateTo = (target: number, velocity: number, onRest?: () => void) => {
+    animation.current?.stop();
+    animTarget.current = target;
+
+    // Reduced motion keeps the change of position — that *is* the content
+    // moving — but drops the travel and the overshoot, letting the opacity
+    // cross-fade on the element carry the transition instead.
+    if (reduceMotion) {
+      animation.current = null;
+      applyTop(target);
+      onRest?.();
+      return;
+    }
+
+    animation.current = spring({
+      from: presentedTop.current,
+      to: target,
+      velocity,
+      damping: SHEET_DAMPING,
+      response: SHEET_RESPONSE,
+      onUpdate: applyTop,
+      onRest: () => {
+        animation.current = null;
+        onRest?.();
+      },
     });
-    return () => cancelAnimationFrame(id);
+  };
+
+  // Opens by sliding up from off-screen, matching Apple Maps' own opening
+  // animation, rather than just appearing already at rest.
+  useLayoutEffect(() => {
+    // Runs after the DOM is in place but before the browser paints, so the
+    // first frame anyone sees is already off-screen — which is the frame the
+    // opening spring animates away from.
+    applyTop(window.innerHeight);
+    const id = requestAnimationFrame(() => setState("peek"));
+    return () => {
+      cancelAnimationFrame(id);
+      animation.current?.stop();
+    };
   }, []);
 
+  // Programmatic moves only — a move a gesture started has already been
+  // handed to a spring by `finishDrag`, and `animTarget` is how this tells
+  // the two apart.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+    if (gesture.current.active) return;
+    const target = restingTop(state, window.innerHeight);
+    if (animTarget.current === target) return;
+    animateTo(target, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
+
+  // Detents are fractions of the viewport, so they move when it does —
+  // a rotation, or the mobile URL bar collapsing.
+  useEffect(() => {
+    const onResize = () => {
+      if (gesture.current.active || animation.current) return;
+      applyTop(restingTop(state, window.innerHeight));
+      animTarget.current = null;
     };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [state]);
 
   const prevResetKey = useRef(resetKey);
   useEffect(() => {
@@ -154,17 +225,33 @@ function SheetBody({
     }
   }, [resetKey]);
 
-  // Hidden is animated to, then unmounted — the state transition plays the
-  // slide-down first, and only once it's finished does the parent actually
-  // close (removing the sheet mid-slide would just make it vanish).
+  // Hidden is animated to, then unmounted — the spring plays the slide-down
+  // first, and only once it has settled does the parent actually close
+  // (removing the sheet mid-slide would just make it vanish). The timeout is
+  // a backstop for a spring that gets interrupted or never rests.
+  const closeOnRest = () => {
+    const timeout = setTimeout(onClose, DISMISS_TIMEOUT_MS);
+    animateTo(window.innerHeight, 0, () => {
+      clearTimeout(timeout);
+      onClose();
+    });
+  };
+
+  const dismiss = () => {
+    if (state === "hidden") return;
+    setState("hidden");
+    animTarget.current = window.innerHeight;
+    closeOnRest();
+  };
+
   useEffect(() => {
-    if (state !== "hidden" || !hasOpened.current) return;
-    const id = setTimeout(onClose, SNAP_DURATION_MS);
-    return () => clearTimeout(id);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismiss();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
-
-  const topPx = dragTop ?? restingTop(state, typeof window !== "undefined" ? window.innerHeight : 0);
 
   const addSample = (y: number) => {
     const samples = gesture.current.samples;
@@ -172,6 +259,8 @@ function SheetBody({
     if (samples.length > 5) samples.shift();
   };
 
+  /** Release velocity in px/s, which is what both the projection and the
+   * spring's initial velocity are expressed in. */
   const releaseVelocity = () => {
     const samples = gesture.current.samples;
     if (samples.length < 2) return 0;
@@ -179,15 +268,37 @@ function SheetBody({
     const last = samples[samples.length - 1];
     const dt = last.t - first.t;
     if (dt <= 0) return 0;
-    return (last.y - first.y) / dt;
+    return ((last.y - first.y) / dt) * 1000;
   };
 
   const finishDrag = () => {
     const vh = window.innerHeight;
-    const raw = dragTop ?? restingTop(state, vh);
     const velocity = releaseVelocity();
-    setState(pickSnap(raw, velocity, vh));
-    setDragTop(null);
+    const next = pickSnap(presentedTop.current, velocity, vh);
+    setState(next);
+
+    if (next === "hidden") {
+      animTarget.current = vh;
+      const timeout = setTimeout(onClose, DISMISS_TIMEOUT_MS);
+      animateTo(vh, velocity, () => {
+        clearTimeout(timeout);
+        onClose();
+      });
+    } else {
+      // The detent catching the sheet is the causal moment worth a pulse —
+      // the one point in the gesture where something snaps home.
+      animateTo(restingTop(next, vh), velocity, haptic);
+    }
+  };
+
+  /** Wherever the sheet is *right now*, animation included — so grabbing a
+   * moving sheet continues from under the finger rather than teleporting to
+   * where it was headed. */
+  const grabTop = () => {
+    const stopped = animation.current?.stop();
+    animation.current = null;
+    animTarget.current = null;
+    return stopped ? stopped.value : presentedTop.current;
   };
 
   // The grabber always drags the sheet, whatever the scroll position —
@@ -205,19 +316,19 @@ function SheetBody({
       active: true,
       pointerId: e.pointerId,
       startY: e.clientY,
-      startTop: restingTop(state, window.innerHeight),
+      startTop: grabTop(),
       mode: "sheet",
+      contentStartScrollTop: 0,
       samples: [],
     };
     addSample(e.clientY);
-    setDragTop(gesture.current.startTop);
   };
 
   const onHandlePointerMove = (e: React.PointerEvent) => {
     if (!gesture.current.active) return;
     addSample(e.clientY);
     const next = gesture.current.startTop + (e.clientY - gesture.current.startY);
-    setDragTop(Math.min(rubberBand(next), window.innerHeight));
+    applyTop(Math.min(rubberBand(next), window.innerHeight));
   };
 
   const onHandlePointerUp = () => {
@@ -243,12 +354,12 @@ function SheetBody({
       active: true,
       pointerId: e.pointerId,
       startY: e.clientY,
-      startTop: restingTop(state, window.innerHeight),
+      startTop: mode === "sheet" ? grabTop() : presentedTop.current,
       mode,
+      contentStartScrollTop: 0,
       samples: [],
     };
     addSample(e.clientY);
-    if (mode === "sheet") setDragTop(gesture.current.startTop);
   };
 
   const onContentPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -256,6 +367,20 @@ function SheetBody({
     if (!g.active) return;
 
     if (g.mode === "content") return; // native scroll, untouched
+
+    if (g.mode === "scrolling") {
+      // Manually driven: this touch already had preventDefault() called on
+      // it earlier in the gesture (while it was still dragging the sheet),
+      // which tells the browser to leave its own native scrolling out of
+      // the rest of this same touch sequence.
+      e.preventDefault();
+      const el = contentEl.current;
+      if (!el) return;
+      const max = el.scrollHeight - el.clientHeight;
+      const raw = g.contentStartScrollTop + (g.startY - e.clientY);
+      el.scrollTop = Math.max(0, Math.min(raw, max));
+      return;
+    }
 
     const deltaY = e.clientY - g.startY;
 
@@ -266,8 +391,7 @@ function SheetBody({
         // while undecided.
         g.mode = "sheet";
         g.startY = e.clientY;
-        g.startTop = restingTop(state, window.innerHeight);
-        setDragTop(g.startTop);
+        g.startTop = grabTop();
       } else if (deltaY < -PENDING_RESOLVE_PX) {
         // Moving up from the top of the content is just a scroll.
         g.mode = "content";
@@ -279,7 +403,27 @@ function SheetBody({
     e.preventDefault();
     addSample(e.clientY);
     const next = g.startTop + (e.clientY - g.startY);
-    setDragTop(Math.min(rubberBand(next), window.innerHeight));
+
+    // Dragging past fully open, in one continuous motion, hands off to
+    // scrolling the content instead of just rubber-banding in place —
+    // otherwise opening the sheet and starting to read take two separate
+    // gestures, which reads as "scrolling doesn't work" on the first try.
+    if (next <= MAXIMIZED_TOP_PX) {
+      const overshoot = MAXIMIZED_TOP_PX - next;
+      setState("maximized");
+      animTarget.current = MAXIMIZED_TOP_PX;
+      applyTop(MAXIMIZED_TOP_PX);
+      const el = contentEl.current;
+      const max = el ? el.scrollHeight - el.clientHeight : 0;
+      const startScrollTop = Math.max(0, Math.min(overshoot, max));
+      if (el) el.scrollTop = startScrollTop;
+      g.mode = "scrolling";
+      g.startY = e.clientY;
+      g.contentStartScrollTop = startScrollTop;
+      return;
+    }
+
+    applyTop(Math.min(rubberBand(next), window.innerHeight));
   };
 
   const onContentPointerUp = () => {
@@ -291,15 +435,16 @@ function SheetBody({
 
   return (
     <div
+      ref={sheetEl}
       role="dialog"
       aria-modal="false"
       aria-label={label}
-      className="fixed inset-x-0 bottom-0 z-30 flex flex-col rounded-t-card bg-offwhite shadow-panel"
-      style={{
-        top: `${topPx}px`,
-        transition:
-          dragTop === null ? `top ${SNAP_DURATION_MS}ms ${SNAP_EASING}` : "none",
-      }}
+      // No inline transform: position is owned by `applyTop`, and a style
+      // prop here would be re-applied on every render, snapping a sheet
+      // mid-drag back to wherever the last render thought it was.
+      className={`fixed inset-x-0 top-[16px] z-30 flex h-[calc(100dvh-16px)] flex-col rounded-t-card bg-offwhite shadow-panel transition-opacity duration-200 ${
+        state === "hidden" ? "opacity-0" : "opacity-100"
+      }`}
     >
       <div
         onPointerDown={onHandlePointerDown}
@@ -316,7 +461,7 @@ function SheetBody({
         onPointerMove={onContentPointerMove}
         onPointerUp={onContentPointerUp}
         onPointerCancel={onContentPointerUp}
-        className={`no-scrollbar min-h-0 flex-1 overscroll-contain ${
+        className={`no-scrollbar safe-b min-h-0 flex-1 overscroll-contain ${
           state === "maximized" ? "touch-pan-y overflow-y-auto" : "touch-none overflow-hidden"
         }`}
       >
