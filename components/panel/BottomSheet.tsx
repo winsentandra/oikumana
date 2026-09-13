@@ -18,7 +18,8 @@ export const PEEK_TOP_FRACTION = 0.67;
 /** How much give a drag past the Maximized boundary gets before it stops
  * moving almost entirely — the classic iOS rubber-band diminishing-return
  * curve, not a hard clamp. Dragging past Hidden isn't given the same
- * treatment: it's already off-screen there, so there's nothing to feel. */
+ * treatment: it's already off-screen there, so there's nothing to feel. The
+ * same curve resists text pushed past its end. */
 const RUBBER_BAND_SOFTNESS = 200;
 
 /** Finger movement, in px, before a touch on the card counts as a drag at
@@ -55,6 +56,11 @@ const MAX_SPRING_VELOCITY = 6000;
  * like a panel snapping. */
 const SCROLL_GLIDE_RESPONSE = 0.7;
 
+/** How quickly text pushed past its end eases back. Critically damped, as in
+ * a native scroll view — text that springs past its resting place and back
+ * reads as a toy. */
+const OVERSCROLL_RETURN_RESPONSE = 0.4;
+
 /** In detent order, top of the screen downwards. */
 const DETENTS: SheetState[] = ["maximized", "peek", "hidden"];
 
@@ -74,11 +80,22 @@ function restingTop(state: SheetState, viewportH: number) {
   return PEEK_TOP_FRACTION * viewportH;
 }
 
+/** Resisted distance for a push of `overshoot` px past a boundary. */
+function rubberBandDistance(overshoot: number) {
+  return (overshoot * RUBBER_BAND_SOFTNESS) / (overshoot + RUBBER_BAND_SOFTNESS);
+}
+
+/** Inverse of `rubberBandDistance`: the push that produces a given resisted
+ * distance. Lets a spring animate what's actually on screen while keeping
+ * the raw push in step, so a grab mid-return continues seamlessly. */
+function unRubberBandDistance(distance: number) {
+  const d = Math.min(Math.max(distance, 0), RUBBER_BAND_SOFTNESS - 0.001);
+  return (d * RUBBER_BAND_SOFTNESS) / (RUBBER_BAND_SOFTNESS - d);
+}
+
 function rubberBand(rawTop: number) {
   if (rawTop >= MAXIMIZED_TOP_PX) return rawTop;
-  const overshoot = MAXIMIZED_TOP_PX - rawTop;
-  const damped = (overshoot * RUBBER_BAND_SOFTNESS) / (overshoot + RUBBER_BAND_SOFTNESS);
-  return MAXIMIZED_TOP_PX - damped;
+  return MAXIMIZED_TOP_PX - rubberBandDistance(MAXIMIZED_TOP_PX - rawTop);
 }
 
 const clampVelocity = (v: number) =>
@@ -186,6 +203,7 @@ function SheetBody({
   const [state, setState] = useState<SheetState>("hidden");
   const sheetEl = useRef<HTMLDivElement>(null);
   const contentEl = useRef<HTMLDivElement>(null);
+  const textEl = useRef<HTMLDivElement>(null);
   const reduceMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
 
   /** The value actually on screen this frame — not the resting value of
@@ -196,6 +214,10 @@ function SheetBody({
   const animation = useRef<SpringHandle | null>(null);
   /** Momentum for the text after a swipe that ended as a scroll. */
   const scrollGlide = useRef<SpringHandle | null>(null);
+  /** How far the text has been pushed past its end, as the raw push before
+   * rubber-banding — kept exact so a grab mid-return picks up where it is. */
+  const overscroll = useRef(0);
+  const overscrollReturn = useRef<SpringHandle | null>(null);
   /** What the running (or last finished) animation was aimed at, so the
    * state effect below doesn't re-animate a move the gesture already began. */
   const animTarget = useRef<number | null>(null);
@@ -264,6 +286,40 @@ function SheetBody({
     });
   };
 
+  const applyOverscroll = (raw: number) => {
+    overscroll.current = Math.max(0, raw);
+    const el = textEl.current;
+    if (!el) return;
+    el.style.transform =
+      overscroll.current > 0
+        ? `translate3d(0, ${-rubberBandDistance(overscroll.current)}px, 0)`
+        : "";
+  };
+
+  /** Ease text that was pushed past its end back into place. Springs the
+   * on-screen distance, not the raw push, so the return reads as one even
+   * motion instead of lingering while the rubber band unwinds. */
+  const releaseOverscroll = () => {
+    if (overscroll.current <= 0) return;
+    overscrollReturn.current?.stop();
+    if (reduceMotion) {
+      overscrollReturn.current = null;
+      applyOverscroll(0);
+      return;
+    }
+    overscrollReturn.current = spring({
+      from: rubberBandDistance(overscroll.current),
+      to: 0,
+      damping: 1,
+      response: OVERSCROLL_RETURN_RESPONSE,
+      onUpdate: (distance) => applyOverscroll(unRubberBandDistance(distance)),
+      onRest: () => {
+        overscrollReturn.current = null;
+        applyOverscroll(0);
+      },
+    });
+  };
+
   const clearDismissTimer = () => {
     if (dismissTimer.current) clearTimeout(dismissTimer.current);
     dismissTimer.current = null;
@@ -305,6 +361,7 @@ function SheetBody({
       cancelAnimationFrame(id);
       animation.current?.stop();
       scrollGlide.current?.stop();
+      overscrollReturn.current?.stop();
       if (dismissTimer.current) clearTimeout(dismissTimer.current);
     };
   }, []);
@@ -337,6 +394,10 @@ function SheetBody({
     if (prevResetKey.current !== resetKey) {
       prevResetKey.current = resetKey;
       if (contentEl.current) contentEl.current.scrollTop = 0;
+      overscrollReturn.current?.stop();
+      overscrollReturn.current = null;
+      overscroll.current = 0;
+      if (textEl.current) textEl.current.style.transform = "";
       setState("peek");
     }
   }, [resetKey]);
@@ -417,6 +478,8 @@ function SheetBody({
   const startGesture = (e: React.PointerEvent, engaged: boolean) => {
     scrollGlide.current?.stop();
     scrollGlide.current = null;
+    overscrollReturn.current?.stop();
+    overscrollReturn.current = null;
     gesture.current = {
       active: true,
       pointerId: e.pointerId,
@@ -436,12 +499,19 @@ function SheetBody({
    * single continuous surface. Every pixel goes to exactly one place, in a
    * fixed order:
    *
-   * - Finger down: unwind any rubber-band above Full, then scroll the text
-   *   back towards its top, then lower the card.
+   * - Finger down: unwind any overshoot above Full, then ease back text that
+   *   was pushed past its end, then scroll the text towards its top, then
+   *   lower the card.
    * - Finger up: raise the card to Full, then scroll further into the text,
-   *   then rubber-band past Full once the text has nowhere left to go.
+   *   then — once the text has nowhere left to go — push the text past its
+   *   end against a rubber band.
    *
-   * That ordering is what lets one swipe both finish scrolling and start
+   * That last step moves the text, never the card. Lifting the card there
+   * pulled its bottom edge up off the screen and showed the map through the
+   * gap; text bouncing inside a card that stays put is how a native sheet
+   * behaves at the end of its content.
+   *
+   * The ordering is what lets one swipe both finish scrolling and start
    * moving the card, in either direction, without lifting.
    */
   const moveContent = (dy: number) => {
@@ -451,12 +521,18 @@ function SheetBody({
     const maxScroll = el ? Math.max(0, el.scrollHeight - el.clientHeight) : 0;
     let raw = g.rawTop;
     let scroll = el ? el.scrollTop : 0;
+    let over = overscroll.current;
 
     if (dy > 0) {
       let down = dy;
       if (raw < MAXIMIZED_TOP_PX) {
         const take = Math.min(down, MAXIMIZED_TOP_PX - raw);
         raw += take;
+        down -= take;
+      }
+      if (down > 0 && over > 0) {
+        const take = Math.min(down, over);
+        over -= take;
         down -= take;
       }
       if (down > 0 && raw <= MAXIMIZED_TOP_PX && scroll > 0) {
@@ -477,7 +553,7 @@ function SheetBody({
         scroll += take;
         up -= take;
       }
-      raw -= up;
+      over += up;
     }
 
     g.rawTop = Math.min(raw, vh);
@@ -485,6 +561,7 @@ function SheetBody({
       el.scrollTop = scroll;
       g.scrolled = true;
     }
+    if (over !== overscroll.current) applyOverscroll(over);
     applyTop(Math.min(rubberBand(g.rawTop), vh));
   };
 
@@ -517,6 +594,7 @@ function SheetBody({
     const g = gesture.current;
     if (!g.active || e.pointerId !== g.pointerId) return;
     g.active = false;
+    releaseOverscroll();
     finishDrag(releaseVelocity());
   };
 
@@ -558,6 +636,7 @@ function SheetBody({
     const g = gesture.current;
     if (!g.active || e.pointerId !== g.pointerId) return;
     g.active = false;
+    releaseOverscroll();
 
     // A tap. It may still have caught the card mid-flight, so send the card
     // on to where it was going rather than leaving it frozen there.
@@ -598,7 +677,13 @@ function SheetBody({
       // No inline transform: position is owned by `applyTop`, and a style
       // prop here would be re-applied on every render, snapping a sheet
       // mid-drag back to wherever the last render thought it was.
-      className={`fixed inset-x-0 top-[16px] z-30 flex h-[calc(100dvh-16px)] flex-col rounded-t-card bg-offwhite shadow-panel transition-opacity duration-200 ${
+      //
+      // The `after` block is more card, a full screen tall, hanging below the
+      // card's bottom edge. At rest it is entirely off-screen. It only shows
+      // when the card itself lifts above Full — a flick open overshooting, or
+      // the grabber pulled past the top — and then the gap shows card, not
+      // the map and search bar behind it.
+      className={`fixed inset-x-0 top-[16px] z-30 flex h-[calc(100dvh-16px)] flex-col rounded-t-card bg-offwhite shadow-panel transition-opacity duration-200 after:absolute after:inset-x-0 after:top-full after:h-[100dvh] after:bg-offwhite after:content-[''] ${
         state === "hidden" ? "opacity-0" : "opacity-100"
       }`}
     >
@@ -636,7 +721,9 @@ function SheetBody({
           state === "maximized" ? "overflow-y-auto" : "overflow-hidden"
         }`}
       >
-        {children}
+        {/* The text's own layer, so it can bounce inside the scroller when
+            pushed past its end while the scroller and the card stay put. */}
+        <div ref={textEl}>{children}</div>
       </div>
     </div>
   );
