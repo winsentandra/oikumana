@@ -21,21 +21,38 @@ export const PEEK_TOP_FRACTION = 0.67;
  * treatment: it's already off-screen there, so there's nothing to feel. */
 const RUBBER_BAND_SOFTNESS = 200;
 
-/** Movement, in px, that resolves an ambiguous maximized/scrollTop=0
- * gesture as "drag the sheet" or "scroll the content". */
-const PENDING_RESOLVE_PX = 8;
+/** Finger movement, in px, before a touch on the card counts as a drag at
+ * all. Below it, it's a tap — on a link, a tab, "Read more" — and nothing
+ * should twitch. */
+const TAP_SLOP_PX = 4;
 
-/** Net travel below which a release is a nudge that changes nothing — the
- * user started a drag and thought better of it. */
+/** How far the card itself has to have moved for a release to count as
+ * moving the card. A swipe that scrolls the text back to its top and only
+ * grazes the card on the way is a scroll, not a request to minimise. */
+const MIN_CARD_TRAVEL_PX = 12;
+
+/** Net travel below which a slow release is a nudge that changes nothing —
+ * the user started a drag and thought better of it. */
 const COMMIT_PX = 24;
 
-/** Release speed, px/s, past which the flick's direction decides the outcome
- * on its own, however far the sheet actually got. */
-const DIRECTION_VELOCITY = 300;
+/** Release speed, px/s, past which the swipe's direction decides the outcome
+ * on its own, however far the card actually got. */
+const DIRECTION_VELOCITY = 500;
 
-/** How quickly manually-driven scroll momentum runs out. Slower than the
- * sheet's own spring, because a page of text coasting to a stop should feel
- * like scrolling, not like a panel snapping. */
+/** Release velocity is measured over the last stretch of the gesture only,
+ * and reads as zero if the finger had already stopped before lifting —
+ * holding still and then letting go is not a flick. */
+const VELOCITY_WINDOW_MS = 100;
+const STALE_RELEASE_MS = 50;
+
+/** Real phone swipes routinely read in the thousands of px/s, and coalesced
+ * touch events can spike far past that. Handed to a spring unclamped, that
+ * throws the card clean off the top of the screen before it settles. */
+const MAX_SPRING_VELOCITY = 6000;
+
+/** How quickly scroll momentum runs out. Slower than the sheet's own spring,
+ * because a page of text coasting to a stop should feel like scrolling, not
+ * like a panel snapping. */
 const SCROLL_GLIDE_RESPONSE = 0.7;
 
 /** In detent order, top of the screen downwards. */
@@ -64,28 +81,32 @@ function rubberBand(rawTop: number) {
   return MAXIMIZED_TOP_PX - damped;
 }
 
+const clampVelocity = (v: number) =>
+  Math.max(-MAX_SPRING_VELOCITY, Math.min(MAX_SPRING_VELOCITY, v));
+
 /**
- * Where a released drag should land, given the detent it started from.
+ * Where a released card lands, given the detent the gesture started from.
  *
- * A deliberate swipe moves the sheet one detent in the direction it was
- * swiped — swipe down from Maximized and you get Peek, every time, however
- * far your thumb actually travelled. That predictability is the point: the
- * alternative, snapping to whichever detent happens to be nearest, means a
- * short swipe down springs straight back to where it started, which reads as
- * the sheet refusing the gesture.
+ * One detent per swipe, never more: swipe down from Full and you get Peek,
+ * however hard you threw it. Both reference apps behave this way. The version
+ * before this didn't — it projected the swipe's momentum forward, and an
+ * ordinary phone-speed swipe projects far past Peek, so the card closed
+ * outright when it should only have minimised.
  *
- * Momentum can still carry it *further* than one detent — the projection
- * below is the same exponential-decay model scrolling uses — so a hard throw
- * from Maximized reaches Hidden in one motion. It can never carry it less.
- * And a release under both thresholds is a nudge, which changes nothing.
+ * Momentum decides the *direction* only. Within that direction the card
+ * settles on whichever reachable detent is nearest to where the finger let
+ * go, so a card dragged most of the way to Peek and released slowly still
+ * goes there, and one flicked back the other way returns home.
  */
 function pickSnap(
   from: SheetState,
-  rawTop: number,
+  releaseTop: number,
   velocity: number,
   viewportH: number
 ): SheetState {
-  const travel = rawTop - restingTop(from, viewportH);
+  const travel = releaseTop - restingTop(from, viewportH);
+  if (Math.abs(travel) < MIN_CARD_TRAVEL_PX) return from;
+
   const direction =
     Math.abs(velocity) > DIRECTION_VELOCITY
       ? Math.sign(velocity)
@@ -95,28 +116,36 @@ function pickSnap(
   if (direction === 0) return from;
 
   const fromIndex = DETENTS.indexOf(from);
-  const stepped = Math.min(DETENTS.length - 1, Math.max(0, fromIndex + direction));
+  const reachable = DETENTS.filter((_, i) => Math.abs(i - fromIndex) <= 1);
+  const ahead = reachable.filter((d) => {
+    const top = restingTop(d, viewportH);
+    return direction > 0 ? top >= releaseTop : top <= releaseTop;
+  });
 
-  const projected = rawTop + projectMomentum(velocity);
-  let nearest = 0;
-  for (let i = 1; i < DETENTS.length; i++) {
-    const closer =
-      Math.abs(restingTop(DETENTS[i], viewportH) - projected) <
-      Math.abs(restingTop(DETENTS[nearest], viewportH) - projected);
-    if (closer) nearest = i;
+  // Carried past the last detent it's allowed to reach: stop there rather
+  // than skipping on to the next one.
+  if (ahead.length === 0) {
+    return direction > 0 ? reachable[reachable.length - 1] : reachable[0];
   }
 
-  return DETENTS[direction > 0 ? Math.max(stepped, nearest) : Math.min(stepped, nearest)];
+  return ahead.reduce((a, b) =>
+    Math.abs(restingTop(b, viewportH) - releaseTop) <
+    Math.abs(restingTop(a, viewportH) - releaseTop)
+      ? b
+      : a
+  );
 }
 
 /**
  * Apple Maps–style bottom sheet: Hidden (off-screen) / Peek (bottom 33%) /
- * Maximized (16px from the top). The sheet tracks the finger 1:1 across the
- * whole range — the grabber always drags it; dragging the content does too,
- * except when Maximized with the content already scrolled down, in which
- * case that same gesture just scrolls the content instead. Release hands the
- * finger's own velocity to a spring, which carries the motion on to whichever
- * detent the throw was heading for, and can be grabbed again mid-flight.
+ * Maximized (16px from the top), tracking the finger 1:1 across the whole
+ * range and settling on a spring that inherits the finger's velocity.
+ *
+ * The card and its text move as one continuous surface. Swiping down first
+ * scrolls the text back to its top and then, without lifting, carries on
+ * pulling the card down; swiping up raises the card to Full and then carries
+ * on into the text. Each release moves the card at most one detent, and a
+ * moving card can be grabbed again mid-flight.
  */
 export function BottomSheet({
   open,
@@ -155,11 +184,6 @@ function SheetBody({
   resetKey?: string;
 }) {
   const [state, setState] = useState<SheetState>("hidden");
-  /** Whether the content is scrolled to its very top. This drives
-   * `touch-action`, which is the only lever that decides — before a touch
-   * even begins — whether the browser or this component owns the gesture.
-   * See the note on the content element below. */
-  const [atTop, setAtTop] = useState(true);
   const sheetEl = useRef<HTMLDivElement>(null);
   const contentEl = useRef<HTMLDivElement>(null);
   const reduceMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
@@ -170,27 +194,33 @@ function SheetBody({
    * wherever it was already heading. */
   const presentedTop = useRef(0);
   const animation = useRef<SpringHandle | null>(null);
-  /** Momentum for scroll this component is driving itself, so a manually
-   * scrolled page still coasts to a stop instead of dying under the finger. */
+  /** Momentum for the text after a swipe that ended as a scroll. */
   const scrollGlide = useRef<SpringHandle | null>(null);
   /** What the running (or last finished) animation was aimed at, so the
    * state effect below doesn't re-animate a move the gesture already began. */
   const animTarget = useRef<number | null>(null);
+  /** Backstop for a dismiss whose spring never reports rest. Tracked so that
+   * grabbing a closing card cancels it — otherwise the card would close
+   * anyway half a second after being pulled back up. */
+  const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /** One active pointer gesture, whichever surface started it.
-   * `scrolling` is a "sheet" drag that reached fully-open mid-gesture and
-   * handed off to manually driving the content's own scrollTop for the
-   * rest of that same touch — see the handoff in onContentPointerMove. */
+  /** One active pointer gesture, on whichever surface started it. */
   const gesture = useRef({
     active: false,
     pointerId: 0,
-    startY: 0,
-    startTop: 0,
-    /** The detent the sheet was resting at when this gesture began — what a
-     * swipe is measured *from*, so "one detent down" means something. */
+    /** The detent the card was resting at (or heading for) when the gesture
+     * began — what "one detent down" is measured from. */
     startState: "peek" as SheetState,
-    mode: "sheet" as "sheet" | "content" | "pending" | "scrolling",
-    contentStartScrollTop: 0,
+    lastY: 0,
+    /** The card's position before rubber-banding, so an overshoot past Full
+     * unwinds by exactly the distance the finger pushed into it. */
+    rawTop: 0,
+    /** Movement accumulated while still inside the tap slop. */
+    slop: 0,
+    /** Past the tap slop: this is a drag, not a tap. */
+    engaged: false,
+    /** Whether this gesture scrolled the text at any point. */
+    scrolled: false,
     samples: [] as { t: number; y: number }[],
   });
 
@@ -220,15 +250,47 @@ function SheetBody({
     animation.current = spring({
       from: presentedTop.current,
       to: target,
-      velocity,
+      velocity: clampVelocity(velocity),
       damping: SHEET_DAMPING,
       response: SHEET_RESPONSE,
-      onUpdate: applyTop,
+      // Overshoot past Full goes through the same rubber band a drag does, so
+      // a hard flick open compresses against the top edge instead of flying
+      // off it.
+      onUpdate: (v) => applyTop(rubberBand(v)),
       onRest: () => {
         animation.current = null;
         onRest?.();
       },
     });
+  };
+
+  const clearDismissTimer = () => {
+    if (dismissTimer.current) clearTimeout(dismissTimer.current);
+    dismissTimer.current = null;
+  };
+
+  /** Spring to a detent. Hidden is animated to and only then unmounted —
+   * removing the sheet mid-slide would just make it vanish. */
+  const settle = (next: SheetState, velocity: number, from?: SheetState) => {
+    const vh = window.innerHeight;
+    if (next === "hidden") {
+      clearDismissTimer();
+      dismissTimer.current = setTimeout(onClose, DISMISS_TIMEOUT_MS);
+      animateTo(vh, velocity, () => {
+        clearDismissTimer();
+        onClose();
+      });
+      return;
+    }
+    // The detent catching the card is the causal moment worth a pulse — but
+    // only when it actually changed. A nudge springing home isn't news.
+    animateTo(restingTop(next, vh), velocity, from !== undefined && next !== from ? haptic : undefined);
+  };
+
+  const dismiss = () => {
+    if (state === "hidden") return;
+    setState("hidden");
+    settle("hidden", 0);
   };
 
   // Opens by sliding up from off-screen, matching Apple Maps' own opening
@@ -242,12 +304,14 @@ function SheetBody({
     return () => {
       cancelAnimationFrame(id);
       animation.current?.stop();
+      scrollGlide.current?.stop();
+      if (dismissTimer.current) clearTimeout(dismissTimer.current);
     };
   }, []);
 
   // Programmatic moves only — a move a gesture started has already been
-  // handed to a spring by `finishDrag`, and `animTarget` is how this tells
-  // the two apart.
+  // handed to a spring on release, and `animTarget` is how this tells the two
+  // apart.
   useEffect(() => {
     if (gesture.current.active) return;
     const target = restingTop(state, window.innerHeight);
@@ -273,29 +337,9 @@ function SheetBody({
     if (prevResetKey.current !== resetKey) {
       prevResetKey.current = resetKey;
       if (contentEl.current) contentEl.current.scrollTop = 0;
-      setAtTop(true);
       setState("peek");
     }
   }, [resetKey]);
-
-  // Hidden is animated to, then unmounted — the spring plays the slide-down
-  // first, and only once it has settled does the parent actually close
-  // (removing the sheet mid-slide would just make it vanish). The timeout is
-  // a backstop for a spring that gets interrupted or never rests.
-  const closeOnRest = () => {
-    const timeout = setTimeout(onClose, DISMISS_TIMEOUT_MS);
-    animateTo(window.innerHeight, 0, () => {
-      clearTimeout(timeout);
-      onClose();
-    });
-  };
-
-  const dismiss = () => {
-    if (state === "hidden") return;
-    setState("hidden");
-    animTarget.current = window.innerHeight;
-    closeOnRest();
-  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -308,53 +352,42 @@ function SheetBody({
 
   const addSample = (y: number) => {
     const samples = gesture.current.samples;
-    samples.push({ t: performance.now(), y });
-    if (samples.length > 5) samples.shift();
+    const now = performance.now();
+    samples.push({ t: now, y });
+    while (samples.length > 2 && now - samples[0].t > VELOCITY_WINDOW_MS) samples.shift();
   };
 
-  /** Release velocity in px/s, which is what both the projection and the
-   * spring's initial velocity are expressed in. */
+  /** Finger velocity at release, px/s, positive downwards. */
   const releaseVelocity = () => {
     const samples = gesture.current.samples;
     if (samples.length < 2) return 0;
-    const first = samples[0];
     const last = samples[samples.length - 1];
+    if (performance.now() - last.t > STALE_RELEASE_MS) return 0;
+    const first = samples[0];
     const dt = last.t - first.t;
     if (dt <= 0) return 0;
     return ((last.y - first.y) / dt) * 1000;
   };
 
-  const finishDrag = () => {
-    const vh = window.innerHeight;
-    const velocity = releaseVelocity();
-    const next = pickSnap(gesture.current.startState, presentedTop.current, velocity, vh);
+  const finishDrag = (velocity: number) => {
+    const from = gesture.current.startState;
+    const next = pickSnap(from, presentedTop.current, velocity, window.innerHeight);
     setState(next);
-
-    if (next === "hidden") {
-      animTarget.current = vh;
-      const timeout = setTimeout(onClose, DISMISS_TIMEOUT_MS);
-      animateTo(vh, velocity, () => {
-        clearTimeout(timeout);
-        onClose();
-      });
-    } else {
-      // The detent catching the sheet is the causal moment worth a pulse —
-      // the one point in the gesture where something snaps home.
-      animateTo(restingTop(next, vh), velocity, haptic);
-    }
+    settle(next, velocity, from);
   };
 
-  /** Wherever the sheet is *right now*, animation included — so grabbing a
-   * moving sheet continues from under the finger rather than teleporting to
-   * where it was headed. */
+  /** Stop whatever the card is doing and report where it is *right now*, so
+   * grabbing a moving card continues from under the finger rather than
+   * teleporting to where it was headed. */
   const grabTop = () => {
-    const stopped = animation.current?.stop();
+    animation.current?.stop();
     animation.current = null;
     animTarget.current = null;
-    return stopped ? stopped.value : presentedTop.current;
+    clearDismissTimer();
+    return presentedTop.current;
   };
 
-  /** Coast the content to a stop after a manually driven scroll, landing
+  /** Coast the text to a stop after a swipe that ended as a scroll, landing
    * where the flick was actually heading. Critically damped: a page of text
    * that overshoots and comes back is not scrolling, it's a spring. */
   const glideScroll = (velocity: number) => {
@@ -363,7 +396,7 @@ function SheetBody({
     const max = el.scrollHeight - el.clientHeight;
     const from = el.scrollTop;
     // The finger moves the opposite way to the content it is pushing.
-    const scrollVelocity = -velocity;
+    const scrollVelocity = -clampVelocity(velocity);
     const target = Math.max(0, Math.min(from + projectMomentum(scrollVelocity), max));
     if (Math.abs(target - from) < 1) return;
     scrollGlide.current = spring({
@@ -377,14 +410,88 @@ function SheetBody({
       },
       onRest: () => {
         scrollGlide.current = null;
-        setAtTop(el.scrollTop === 0);
       },
     });
   };
 
-  // The grabber always drags the sheet, whatever the scroll position —
-  // that's what keeps short, never-scrolling content collapsible too.
+  const startGesture = (e: React.PointerEvent, engaged: boolean) => {
+    scrollGlide.current?.stop();
+    scrollGlide.current = null;
+    gesture.current = {
+      active: true,
+      pointerId: e.pointerId,
+      startState: state,
+      lastY: e.clientY,
+      rawTop: grabTop(),
+      slop: 0,
+      engaged,
+      scrolled: false,
+      samples: [],
+    };
+    addSample(e.clientY);
+  };
+
+  /**
+   * Spend one step of finger movement across the card and its text, as a
+   * single continuous surface. Every pixel goes to exactly one place, in a
+   * fixed order:
+   *
+   * - Finger down: unwind any rubber-band above Full, then scroll the text
+   *   back towards its top, then lower the card.
+   * - Finger up: raise the card to Full, then scroll further into the text,
+   *   then rubber-band past Full once the text has nowhere left to go.
+   *
+   * That ordering is what lets one swipe both finish scrolling and start
+   * moving the card, in either direction, without lifting.
+   */
+  const moveContent = (dy: number) => {
+    const g = gesture.current;
+    const el = contentEl.current;
+    const vh = window.innerHeight;
+    const maxScroll = el ? Math.max(0, el.scrollHeight - el.clientHeight) : 0;
+    let raw = g.rawTop;
+    let scroll = el ? el.scrollTop : 0;
+
+    if (dy > 0) {
+      let down = dy;
+      if (raw < MAXIMIZED_TOP_PX) {
+        const take = Math.min(down, MAXIMIZED_TOP_PX - raw);
+        raw += take;
+        down -= take;
+      }
+      if (down > 0 && raw <= MAXIMIZED_TOP_PX && scroll > 0) {
+        const take = Math.min(down, scroll);
+        scroll -= take;
+        down -= take;
+      }
+      raw += down;
+    } else if (dy < 0) {
+      let up = -dy;
+      if (raw > MAXIMIZED_TOP_PX) {
+        const take = Math.min(up, raw - MAXIMIZED_TOP_PX);
+        raw -= take;
+        up -= take;
+      }
+      if (up > 0 && scroll < maxScroll) {
+        const take = Math.min(up, maxScroll - scroll);
+        scroll += take;
+        up -= take;
+      }
+      raw -= up;
+    }
+
+    g.rawTop = Math.min(raw, vh);
+    if (el && el.scrollTop !== scroll) {
+      el.scrollTop = scroll;
+      g.scrolled = true;
+    }
+    applyTop(Math.min(rubberBand(g.rawTop), vh));
+  };
+
+  // The grabber drags only the card, never the text — so a card scrolled deep
+  // into its text can still be collapsed with one short swipe from its edge.
   const onHandlePointerDown = (e: React.PointerEvent) => {
+    if (gesture.current.active) return;
     // Capture can fail if the browser never registered this as an active
     // pointer (e.g. a synthetic event) — the drag itself doesn't depend on
     // capture succeeding, so a failure here shouldn't abort it.
@@ -393,154 +500,93 @@ function SheetBody({
     } catch {
       // ignore
     }
-    scrollGlide.current?.stop();
-    scrollGlide.current = null;
-    gesture.current = {
-      active: true,
-      pointerId: e.pointerId,
-      startY: e.clientY,
-      startTop: grabTop(),
-      startState: state,
-      mode: "sheet",
-      contentStartScrollTop: 0,
-      samples: [],
-    };
-    addSample(e.clientY);
+    startGesture(e, true);
   };
 
   const onHandlePointerMove = (e: React.PointerEvent) => {
-    if (!gesture.current.active) return;
+    const g = gesture.current;
+    if (!g.active || e.pointerId !== g.pointerId) return;
+    const dy = e.clientY - g.lastY;
+    g.lastY = e.clientY;
     addSample(e.clientY);
-    const next = gesture.current.startTop + (e.clientY - gesture.current.startY);
-    applyTop(Math.min(rubberBand(next), window.innerHeight));
+    g.rawTop = Math.min(g.rawTop + dy, window.innerHeight);
+    applyTop(Math.min(rubberBand(g.rawTop), window.innerHeight));
   };
 
-  const onHandlePointerUp = () => {
-    if (!gesture.current.active) return;
-    gesture.current.active = false;
-    finishDrag();
+  const onHandlePointerUp = (e: React.PointerEvent) => {
+    const g = gesture.current;
+    if (!g.active || e.pointerId !== g.pointerId) return;
+    g.active = false;
+    finishDrag(releaseVelocity());
   };
 
-  // On the content itself: at Peek, content is scroll-locked, so any drag
-  // there belongs to the sheet (same as the grabber). At Maximized, a drag
-  // that starts with the content already scrolled down is content-scroll,
-  // full stop, for the whole gesture — decided once, right here, rather
-  // than re-checked mid-drag. A drag that starts at scrollTop 0 is
-  // ambiguous until it moves: scrolling further into the content (up) is
-  // just a scroll, while a deliberate move down is what drags the sheet
-  // back to Peek — `pending` is that undecided window.
-  //
-  // The scrollTop-0 case is read from state rather than measured here,
-  // because the same value has already had to be committed to a class name
-  // (see `touch-action` on the element below) *before* this touch started.
-  // Measuring it again could disagree with what the browser was told, and
-  // the browser's copy is the one that decides who gets the gesture.
   const onContentPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    scrollGlide.current?.stop();
-    scrollGlide.current = null;
-
-    const el = e.currentTarget;
-    const scrollable = el.scrollHeight - el.clientHeight > 1;
-    const mode: "sheet" | "content" | "pending" =
-      state !== "maximized" ? "sheet" : !atTop ? "content" : scrollable ? "pending" : "sheet";
-
-    gesture.current = {
-      active: true,
-      pointerId: e.pointerId,
-      startY: e.clientY,
-      startTop: mode === "sheet" ? grabTop() : presentedTop.current,
-      startState: state,
-      mode,
-      contentStartScrollTop: el.scrollTop,
-      samples: [],
-    };
-    addSample(e.clientY);
+    if (gesture.current.active) return;
+    startGesture(e, false);
   };
 
   const onContentPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const g = gesture.current;
-    if (!g.active) return;
-
-    if (g.mode === "content") return; // native scroll, untouched
-
-    if (g.mode === "scrolling") {
-      // Manually driven: this touch already had preventDefault() called on
-      // it earlier in the gesture (while it was still dragging the sheet),
-      // which tells the browser to leave its own native scrolling out of
-      // the rest of this same touch sequence.
-      e.preventDefault();
-      const el = contentEl.current;
-      if (!el) return;
-      const max = el.scrollHeight - el.clientHeight;
-      const raw = g.contentStartScrollTop + (g.startY - e.clientY);
-      el.scrollTop = Math.max(0, Math.min(raw, max));
-      addSample(e.clientY);
-      return;
-    }
-
-    const deltaY = e.clientY - g.startY;
-
-    if (g.mode === "pending") {
-      if (deltaY > PENDING_RESOLVE_PX) {
-        // Deliberate downward move: commit to dragging the sheet, starting
-        // fresh from here so it doesn't jump by the distance already moved
-        // while undecided.
-        g.mode = "sheet";
-        g.startY = e.clientY;
-        g.startTop = grabTop();
-      } else if (deltaY < -PENDING_RESOLVE_PX) {
-        // Moving up from the top of the content is a scroll — but one this
-        // component has to drive itself, because the element it started on
-        // is `touch-action: none` for exactly the reason above. Handing it
-        // back to the browser now is not an option: nothing can opt a touch
-        // into native scrolling once it has begun.
-        g.mode = "scrolling";
-        g.startY = e.clientY;
-        g.contentStartScrollTop = contentEl.current?.scrollTop ?? 0;
-      }
-      return;
-    }
-
-    // g.mode === "sheet"
-    e.preventDefault();
+    if (!g.active || e.pointerId !== g.pointerId) return;
+    const dy = e.clientY - g.lastY;
+    g.lastY = e.clientY;
     addSample(e.clientY);
-    const next = g.startTop + (e.clientY - g.startY);
 
-    // Dragging past fully open, in one continuous motion, hands off to
-    // scrolling the content instead of just rubber-banding in place —
-    // otherwise opening the sheet and starting to read take two separate
-    // gestures, which reads as "scrolling doesn't work" on the first try.
-    if (next <= MAXIMIZED_TOP_PX) {
-      const overshoot = MAXIMIZED_TOP_PX - next;
-      setState("maximized");
-      animTarget.current = MAXIMIZED_TOP_PX;
-      applyTop(MAXIMIZED_TOP_PX);
-      const el = contentEl.current;
-      const max = el ? el.scrollHeight - el.clientHeight : 0;
-      const startScrollTop = Math.max(0, Math.min(overshoot, max));
-      if (el) el.scrollTop = startScrollTop;
-      g.mode = "scrolling";
-      g.startY = e.clientY;
-      g.contentStartScrollTop = startScrollTop;
+    if (!g.engaged) {
+      g.slop += dy;
+      if (Math.abs(g.slop) < TAP_SLOP_PX) return;
+      g.engaged = true;
+      // Captured only now that it's definitely a drag. Capturing on the
+      // pointerdown would retarget the eventual click away from whatever was
+      // tapped, and break every link and button inside the card.
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+      // Spend the movement held back by the slop, so the card doesn't lag
+      // the finger by it for the rest of the gesture.
+      moveContent(g.slop);
       return;
     }
 
-    applyTop(Math.min(rubberBand(next), window.innerHeight));
+    e.preventDefault();
+    moveContent(dy);
   };
 
-  const onContentPointerUp = () => {
+  const onContentPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     const g = gesture.current;
-    if (!g.active) return;
+    if (!g.active || e.pointerId !== g.pointerId) return;
     g.active = false;
-    if (g.mode === "sheet") {
-      finishDrag();
-    } else if (g.mode === "scrolling") {
-      // Hand the finger's speed to the scroll the same way a release hands
-      // it to the sheet — without this, manually driven scrolling stops dead
-      // the instant the thumb lifts, which native scrolling never does.
-      glideScroll(releaseVelocity());
-      setAtTop((contentEl.current?.scrollTop ?? 0) === 0);
+
+    // A tap. It may still have caught the card mid-flight, so send the card
+    // on to where it was going rather than leaving it frozen there.
+    if (!g.engaged) {
+      settle(g.startState, 0);
+      return;
     }
+
+    const velocity = releaseVelocity();
+    const cardAtFull = Math.abs(presentedTop.current - MAXIMIZED_TOP_PX) < 0.5;
+
+    if (cardAtFull && g.scrolled) {
+      // Ended as a scroll with the card resting at Full: nothing to snap.
+      applyTop(MAXIMIZED_TOP_PX);
+      animTarget.current = MAXIMIZED_TOP_PX;
+      if (state !== "maximized") {
+        setState("maximized");
+        haptic();
+      }
+      // The momentum belongs to the text only if the swipe began at Full. One
+      // that raised the card from Peek and ran on into the text stops where
+      // the finger left it — otherwise flicking the card open would land you
+      // partway down the article, and the next swipe down would be spent
+      // scrolling back up before it could reach the card.
+      if (g.startState === "maximized") glideScroll(velocity);
+      return;
+    }
+
+    finishDrag(velocity);
   };
 
   return (
@@ -567,28 +613,27 @@ function SheetBody({
       </div>
       <div
         ref={contentEl}
-        onScroll={(e) => setAtTop(e.currentTarget.scrollTop === 0)}
         onPointerDown={onContentPointerDown}
         onPointerMove={onContentPointerMove}
         onPointerUp={onContentPointerUp}
         onPointerCancel={onContentPointerUp}
-        // `touch-action` is the whole ballgame for the scrollTop-0 case, and
-        // it has to be right *before* the finger lands: once the browser has
-        // started scrolling a touch natively, nothing can take it back —
-        // preventDefault on later moves is simply ignored. So while the
-        // content sits at its top, this claims the gesture outright, and a
-        // downward swipe can minimise the sheet. That was the bug: with
-        // `pan-y` here, the browser owned the touch from the first pixel and
-        // spent it rubber-banding the content, and the sheet never moved.
+        // `touch-none`, always — the load-bearing decision in this component.
+        // A touch the browser has started scrolling natively can't be handed
+        // to script partway through (iOS ignores preventDefault from then on),
+        // and a touch script owns can't be handed back. So "scroll the text to
+        // its top and keep pulling the card down, in one motion" is impossible
+        // while the browser does the scrolling. The card owns every touch
+        // instead, and scrolls the text itself — see `moveContent`.
         //
-        // Past the top, `pan-y` hands scrolling back to the browser, which
-        // does it better than any of this — real momentum, real interruption.
-        className={`no-scrollbar safe-b min-h-0 flex-1 overscroll-contain ${
-          state === "maximized" && !atTop
-            ? "touch-pan-y overflow-y-auto"
-            : state === "maximized"
-              ? "touch-none overflow-y-auto"
-              : "touch-none overflow-hidden"
+        // The previous version toggled this between `none` and `pan-y` as the
+        // text reached its top, and each way that could go stale — a scroll
+        // position of 0.33 on a 3x screen, WebKit applying the new value a
+        // beat late — produced a swipe that did nothing, then another.
+        //
+        // Wheel, trackpad, keyboard and assistive scrolling are unaffected:
+        // `touch-action` only governs touch.
+        className={`no-scrollbar safe-b min-h-0 flex-1 touch-none overscroll-contain ${
+          state === "maximized" ? "overflow-y-auto" : "overflow-hidden"
         }`}
       >
         {children}
