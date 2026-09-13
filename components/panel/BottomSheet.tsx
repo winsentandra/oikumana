@@ -21,9 +21,25 @@ export const PEEK_TOP_FRACTION = 0.67;
  * treatment: it's already off-screen there, so there's nothing to feel. */
 const RUBBER_BAND_SOFTNESS = 200;
 
-/** Downward drag, in px, that resolves an ambiguous maximized/scrollTop=0
- * gesture as "drag the sheet" rather than "just scroll the content". */
+/** Movement, in px, that resolves an ambiguous maximized/scrollTop=0
+ * gesture as "drag the sheet" or "scroll the content". */
 const PENDING_RESOLVE_PX = 8;
+
+/** Net travel below which a release is a nudge that changes nothing — the
+ * user started a drag and thought better of it. */
+const COMMIT_PX = 24;
+
+/** Release speed, px/s, past which the flick's direction decides the outcome
+ * on its own, however far the sheet actually got. */
+const DIRECTION_VELOCITY = 300;
+
+/** How quickly manually-driven scroll momentum runs out. Slower than the
+ * sheet's own spring, because a page of text coasting to a stop should feel
+ * like scrolling, not like a panel snapping. */
+const SCROLL_GLIDE_RESPONSE = 0.7;
+
+/** In detent order, top of the screen downwards. */
+const DETENTS: SheetState[] = ["maximized", "peek", "hidden"];
 
 /** Apple's own sheet numbers: a little overshoot, because every move this
  * sheet makes is the continuation of a drag the user's hand just gave it. */
@@ -49,23 +65,48 @@ function rubberBand(rawTop: number) {
 }
 
 /**
- * The detent a flick is actually heading for. Rather than testing the release
- * velocity against a threshold, this projects where the motion would come to
- * rest on its own — the same exponential-decay model scrolling uses — and
- * snaps to whichever detent is nearest *that*. A hard throw from Maximized
- * therefore reaches Hidden in one motion, and a slow release still lands on
- * the nearest detent, without the two cases needing separate rules.
+ * Where a released drag should land, given the detent it started from.
+ *
+ * A deliberate swipe moves the sheet one detent in the direction it was
+ * swiped — swipe down from Maximized and you get Peek, every time, however
+ * far your thumb actually travelled. That predictability is the point: the
+ * alternative, snapping to whichever detent happens to be nearest, means a
+ * short swipe down springs straight back to where it started, which reads as
+ * the sheet refusing the gesture.
+ *
+ * Momentum can still carry it *further* than one detent — the projection
+ * below is the same exponential-decay model scrolling uses — so a hard throw
+ * from Maximized reaches Hidden in one motion. It can never carry it less.
+ * And a release under both thresholds is a nudge, which changes nothing.
  */
-function pickSnap(rawTop: number, velocity: number, viewportH: number): SheetState {
-  const points: { key: SheetState; top: number }[] = [
-    { key: "maximized", top: MAXIMIZED_TOP_PX },
-    { key: "peek", top: PEEK_TOP_FRACTION * viewportH },
-    { key: "hidden", top: viewportH },
-  ];
+function pickSnap(
+  from: SheetState,
+  rawTop: number,
+  velocity: number,
+  viewportH: number
+): SheetState {
+  const travel = rawTop - restingTop(from, viewportH);
+  const direction =
+    Math.abs(velocity) > DIRECTION_VELOCITY
+      ? Math.sign(velocity)
+      : Math.abs(travel) > COMMIT_PX
+        ? Math.sign(travel)
+        : 0;
+  if (direction === 0) return from;
+
+  const fromIndex = DETENTS.indexOf(from);
+  const stepped = Math.min(DETENTS.length - 1, Math.max(0, fromIndex + direction));
+
   const projected = rawTop + projectMomentum(velocity);
-  return points.reduce((a, b) =>
-    Math.abs(b.top - projected) < Math.abs(a.top - projected) ? b : a
-  ).key;
+  let nearest = 0;
+  for (let i = 1; i < DETENTS.length; i++) {
+    const closer =
+      Math.abs(restingTop(DETENTS[i], viewportH) - projected) <
+      Math.abs(restingTop(DETENTS[nearest], viewportH) - projected);
+    if (closer) nearest = i;
+  }
+
+  return DETENTS[direction > 0 ? Math.max(stepped, nearest) : Math.min(stepped, nearest)];
 }
 
 /**
@@ -114,6 +155,11 @@ function SheetBody({
   resetKey?: string;
 }) {
   const [state, setState] = useState<SheetState>("hidden");
+  /** Whether the content is scrolled to its very top. This drives
+   * `touch-action`, which is the only lever that decides — before a touch
+   * even begins — whether the browser or this component owns the gesture.
+   * See the note on the content element below. */
+  const [atTop, setAtTop] = useState(true);
   const sheetEl = useRef<HTMLDivElement>(null);
   const contentEl = useRef<HTMLDivElement>(null);
   const reduceMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
@@ -124,6 +170,9 @@ function SheetBody({
    * wherever it was already heading. */
   const presentedTop = useRef(0);
   const animation = useRef<SpringHandle | null>(null);
+  /** Momentum for scroll this component is driving itself, so a manually
+   * scrolled page still coasts to a stop instead of dying under the finger. */
+  const scrollGlide = useRef<SpringHandle | null>(null);
   /** What the running (or last finished) animation was aimed at, so the
    * state effect below doesn't re-animate a move the gesture already began. */
   const animTarget = useRef<number | null>(null);
@@ -137,6 +186,9 @@ function SheetBody({
     pointerId: 0,
     startY: 0,
     startTop: 0,
+    /** The detent the sheet was resting at when this gesture began — what a
+     * swipe is measured *from*, so "one detent down" means something. */
+    startState: "peek" as SheetState,
     mode: "sheet" as "sheet" | "content" | "pending" | "scrolling",
     contentStartScrollTop: 0,
     samples: [] as { t: number; y: number }[],
@@ -221,6 +273,7 @@ function SheetBody({
     if (prevResetKey.current !== resetKey) {
       prevResetKey.current = resetKey;
       if (contentEl.current) contentEl.current.scrollTop = 0;
+      setAtTop(true);
       setState("peek");
     }
   }, [resetKey]);
@@ -274,7 +327,7 @@ function SheetBody({
   const finishDrag = () => {
     const vh = window.innerHeight;
     const velocity = releaseVelocity();
-    const next = pickSnap(presentedTop.current, velocity, vh);
+    const next = pickSnap(gesture.current.startState, presentedTop.current, velocity, vh);
     setState(next);
 
     if (next === "hidden") {
@@ -301,6 +354,34 @@ function SheetBody({
     return stopped ? stopped.value : presentedTop.current;
   };
 
+  /** Coast the content to a stop after a manually driven scroll, landing
+   * where the flick was actually heading. Critically damped: a page of text
+   * that overshoots and comes back is not scrolling, it's a spring. */
+  const glideScroll = (velocity: number) => {
+    const el = contentEl.current;
+    if (!el) return;
+    const max = el.scrollHeight - el.clientHeight;
+    const from = el.scrollTop;
+    // The finger moves the opposite way to the content it is pushing.
+    const scrollVelocity = -velocity;
+    const target = Math.max(0, Math.min(from + projectMomentum(scrollVelocity), max));
+    if (Math.abs(target - from) < 1) return;
+    scrollGlide.current = spring({
+      from,
+      to: target,
+      velocity: scrollVelocity,
+      damping: 1,
+      response: SCROLL_GLIDE_RESPONSE,
+      onUpdate: (v) => {
+        el.scrollTop = v;
+      },
+      onRest: () => {
+        scrollGlide.current = null;
+        setAtTop(el.scrollTop === 0);
+      },
+    });
+  };
+
   // The grabber always drags the sheet, whatever the scroll position —
   // that's what keeps short, never-scrolling content collapsible too.
   const onHandlePointerDown = (e: React.PointerEvent) => {
@@ -312,11 +393,14 @@ function SheetBody({
     } catch {
       // ignore
     }
+    scrollGlide.current?.stop();
+    scrollGlide.current = null;
     gesture.current = {
       active: true,
       pointerId: e.pointerId,
       startY: e.clientY,
       startTop: grabTop(),
+      startState: state,
       mode: "sheet",
       contentStartScrollTop: 0,
       samples: [],
@@ -345,18 +429,29 @@ function SheetBody({
   // ambiguous until it moves: scrolling further into the content (up) is
   // just a scroll, while a deliberate move down is what drags the sheet
   // back to Peek — `pending` is that undecided window.
+  //
+  // The scrollTop-0 case is read from state rather than measured here,
+  // because the same value has already had to be committed to a class name
+  // (see `touch-action` on the element below) *before* this touch started.
+  // Measuring it again could disagree with what the browser was told, and
+  // the browser's copy is the one that decides who gets the gesture.
   const onContentPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    const atTop = e.currentTarget.scrollTop === 0;
+    scrollGlide.current?.stop();
+    scrollGlide.current = null;
+
+    const el = e.currentTarget;
+    const scrollable = el.scrollHeight - el.clientHeight > 1;
     const mode: "sheet" | "content" | "pending" =
-      state !== "maximized" ? "sheet" : atTop ? "pending" : "content";
+      state !== "maximized" ? "sheet" : !atTop ? "content" : scrollable ? "pending" : "sheet";
 
     gesture.current = {
       active: true,
       pointerId: e.pointerId,
       startY: e.clientY,
       startTop: mode === "sheet" ? grabTop() : presentedTop.current,
+      startState: state,
       mode,
-      contentStartScrollTop: 0,
+      contentStartScrollTop: el.scrollTop,
       samples: [],
     };
     addSample(e.clientY);
@@ -379,6 +474,7 @@ function SheetBody({
       const max = el.scrollHeight - el.clientHeight;
       const raw = g.contentStartScrollTop + (g.startY - e.clientY);
       el.scrollTop = Math.max(0, Math.min(raw, max));
+      addSample(e.clientY);
       return;
     }
 
@@ -393,8 +489,14 @@ function SheetBody({
         g.startY = e.clientY;
         g.startTop = grabTop();
       } else if (deltaY < -PENDING_RESOLVE_PX) {
-        // Moving up from the top of the content is just a scroll.
-        g.mode = "content";
+        // Moving up from the top of the content is a scroll — but one this
+        // component has to drive itself, because the element it started on
+        // is `touch-action: none` for exactly the reason above. Handing it
+        // back to the browser now is not an option: nothing can opt a touch
+        // into native scrolling once it has begun.
+        g.mode = "scrolling";
+        g.startY = e.clientY;
+        g.contentStartScrollTop = contentEl.current?.scrollTop ?? 0;
       }
       return;
     }
@@ -430,7 +532,15 @@ function SheetBody({
     const g = gesture.current;
     if (!g.active) return;
     g.active = false;
-    if (g.mode === "sheet") finishDrag();
+    if (g.mode === "sheet") {
+      finishDrag();
+    } else if (g.mode === "scrolling") {
+      // Hand the finger's speed to the scroll the same way a release hands
+      // it to the sheet — without this, manually driven scrolling stops dead
+      // the instant the thumb lifts, which native scrolling never does.
+      glideScroll(releaseVelocity());
+      setAtTop((contentEl.current?.scrollTop ?? 0) === 0);
+    }
   };
 
   return (
@@ -457,12 +567,28 @@ function SheetBody({
       </div>
       <div
         ref={contentEl}
+        onScroll={(e) => setAtTop(e.currentTarget.scrollTop === 0)}
         onPointerDown={onContentPointerDown}
         onPointerMove={onContentPointerMove}
         onPointerUp={onContentPointerUp}
         onPointerCancel={onContentPointerUp}
+        // `touch-action` is the whole ballgame for the scrollTop-0 case, and
+        // it has to be right *before* the finger lands: once the browser has
+        // started scrolling a touch natively, nothing can take it back —
+        // preventDefault on later moves is simply ignored. So while the
+        // content sits at its top, this claims the gesture outright, and a
+        // downward swipe can minimise the sheet. That was the bug: with
+        // `pan-y` here, the browser owned the touch from the first pixel and
+        // spent it rubber-banding the content, and the sheet never moved.
+        //
+        // Past the top, `pan-y` hands scrolling back to the browser, which
+        // does it better than any of this — real momentum, real interruption.
         className={`no-scrollbar safe-b min-h-0 flex-1 overscroll-contain ${
-          state === "maximized" ? "touch-pan-y overflow-y-auto" : "touch-none overflow-hidden"
+          state === "maximized" && !atTop
+            ? "touch-pan-y overflow-y-auto"
+            : state === "maximized"
+              ? "touch-none overflow-y-auto"
+              : "touch-none overflow-hidden"
         }`}
       >
         {children}

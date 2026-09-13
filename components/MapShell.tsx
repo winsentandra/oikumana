@@ -275,8 +275,14 @@ export function MapShell() {
             setQuery("");
             setSearching(false);
           }}
+          // Desktop only. There, the field sits in the panel strip and its
+          // own X is how the detail panel is dismissed. On mobile the detail
+          // view is the sheet, dismissed by dragging it — and the field is
+          // the bottom bar, still on screen behind the sheet, so adding the X
+          // there only flashed a dismiss button and its separator into the
+          // bar for the frames before the sheet covered it.
           trailingAction={
-            view === "detail"
+            isDesktop && view === "detail"
               ? { label: t(locale, "closePanel"), onClick: closePanel }
               : undefined
           }
